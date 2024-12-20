@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -180,16 +181,31 @@ func (s *Syncer) copyObject(ctx context.Context, key string) error {
 }
 
 func (s *Syncer) Run(ctx context.Context) error {
+	var successCount, failureCount int64
+	ticker := time.NewTicker(time.Minute)
+
 	g, ctx := errgroup.WithContext(ctx)
 	keys := make(chan string, s.workers*2)
 	copiedKeys := make(chan string, 1000) // 用于存储已复制键的缓冲通道
 	failedKeys := make(chan string, 1000) // 用于存储失败键的缓冲通道
 	defer func() {
-		fmt.Println("close keys")
+		fmt.Println("relase source channel")
 		close(keys)
 		close(copiedKeys)
 		close(failedKeys)
+		defer ticker.Stop()
 	}()
+	// Log the counts every minute
+	g.Go(func() error {
+		for {
+			select {
+			case <-ticker.C:
+				hlog.Infof("Cumulative Success: %d, Cumulative Failures: %d", successCount, failureCount)
+			case <-ctx.Done():
+				return nil
+			}
+		}
+	})
 	g.Go(func() error {
 		return s.listObjects(ctx, keys)
 	})
