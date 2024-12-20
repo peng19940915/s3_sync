@@ -13,6 +13,7 @@ type SyncOptions struct {
 	Region       string
 	Workers      int
 	Prefix       string
+	RecordFile   string
 }
 
 func NewSyncOptions() *SyncOptions {
@@ -26,6 +27,7 @@ func (o *SyncOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVarP(&o.Region, "region", "r", "us-east-1", "Region")
 	fs.IntVarP(&o.Workers, "workers", "w", 10, "Workers")
 	fs.StringVarP(&o.Prefix, "prefix", "p", "", "Prefix")
+	fs.StringVarP(&o.RecordFile, "record-file", "f", "", "Record file")
 }
 
 func (o *SyncOptions) Validate() error {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -29,8 +30,8 @@ type Syncer struct {
 	workers      int
 	prefix       string
 	copiedKeys   sync.Map
-
-	limiter *rate.Limiter
+	recordFile   string
+	limiter      *rate.Limiter
 }
 
 // 任务对象池
@@ -48,6 +49,7 @@ func NewSyncer(opts *options.SyncOptions) *Syncer {
 		region:       opts.Region,
 		workers:      opts.Workers,
 		prefix:       opts.Prefix,
+		recordFile:   opts.RecordFile,
 		//limiter:      rate.NewLimiter(rate.Limit(1000), 1000), // 每秒1000个请求
 	}
 	s.loadCopiedKeys(fmt.Sprintf("%s_%s", known.SuccessRecordPath, s.sourceBucket))
@@ -123,6 +125,9 @@ func (s *Syncer) listObjects(ctx context.Context, tasks chan<- string) error {
 		}
 		// 将对象加入任务队列
 		for _, obj := range output.Contents {
+			if _, ok := s.copiedKeys.Load(*obj.Key); ok {
+				continue
+			}
 			select {
 			case tasks <- *obj.Key:
 			case <-ctx.Done():
@@ -130,6 +135,51 @@ func (s *Syncer) listObjects(ctx context.Context, tasks chan<- string) error {
 			}
 		}
 	}
+	return nil
+}
+
+// 从文件中加载需要复制的key
+func (s *Syncer) listObjectsFromFile(ctx context.Context, tasks chan<- string) error {
+	file, err := os.Open(s.recordFile)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	reader := bufio.NewReaderSize(file, known.FileBufferSize)
+	for {
+		line, isPrefix, err := reader.ReadLine()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return fmt.Errorf("failed to read line: %w", err)
+		}
+		if isPrefix {
+			var fullLine []byte
+			fullLine = append(fullLine, line...)
+			for isPrefix {
+				line, isPrefix, err = reader.ReadLine()
+				if err != nil {
+					return fmt.Errorf("failed to read line: %w", err)
+				}
+				fullLine = append(fullLine, line...)
+			}
+			line = fullLine
+		}
+		key := strings.TrimSpace(string(line))
+		if key == "" {
+			continue
+		}
+		if _, ok := s.copiedKeys.Load(key); ok {
+			continue
+		}
+		select {
+		case tasks <- key:
+		case <-ctx.Done():
+			return nil
+		}
+	}
+	hlog.Infof("Finished load all key from file:%s", s.recordFile)
 	return nil
 }
 
@@ -226,13 +276,13 @@ func (s *Syncer) Run(ctx context.Context) error {
 					}
 					if err := s.CopyObjectWithRetry(ctx, key); err != nil {
 						if err != context.Canceled {
-							//s.failedKeys.Store(key, struct{}{})
 							failedKeys <- key
+							failureCount++
 						}
 						continue
 					}
-					//s.copiedKeys.Store(key, struct{}{})
 					copiedKeys <- key
+					successCount++
 				case <-ctx.Done():
 					return nil
 				}

@@ -13,3 +13,7 @@ const (
 const (
 	S3CopyMaxRetries = 3
 )
+
+const (
+	FileBufferSize = 1 * 1024 * 1024 // 1MB
+)
