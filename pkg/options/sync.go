@@ -2,6 +2,7 @@ package options
 
 import (
 	"errors"
+	"os"
 
 	"github.com/spf13/pflag"
 )
@@ -21,8 +22,8 @@ func NewSyncOptions() *SyncOptions {
 }
 
 func (o *SyncOptions) AddFlags(fs *pflag.FlagSet) {
-	fs.StringVarP(&o.SourceBucket, "source-bucket", "s", "", "Source bucket")
-	fs.StringVarP(&o.TargetBucket, "target-bucket", "t", "", "Target bucket")
+	fs.StringVarP(&o.SourceBucket, "source-bucket", "s", "null", "Source bucket")
+	fs.StringVarP(&o.TargetBucket, "target-bucket", "t", "null", "Target bucket")
 	fs.BoolVarP(&o.ShowVersion, "version", "v", false, "Show version")
 	fs.StringVarP(&o.Region, "region", "r", "us-east-1", "Region")
 	fs.IntVarP(&o.Workers, "workers", "w", 10, "Workers")
@@ -31,14 +32,22 @@ func (o *SyncOptions) AddFlags(fs *pflag.FlagSet) {
 }
 
 func (o *SyncOptions) Validate() error {
-	if o.SourceBucket == "" {
+	if o.SourceBucket == "" && o.RecordFile == "" {
 		return errors.New("source-bucket is required")
 	}
-	if o.TargetBucket == "" {
+	if o.TargetBucket == "" && o.RecordFile == "" {
 		return errors.New("target-bucket is required")
 	}
-	if o.Prefix != "" {
-		return errors.New("prefix is required")
+	if o.TargetBucket == "" && o.SourceBucket == "" && o.RecordFile == "" {
+		return errors.New("if target-bucket and source-bucket is not set, record-file is required")
+	}
+	if o.RecordFile != "" {
+		if _, err := os.Stat(o.RecordFile); os.IsNotExist(err) {
+			return errors.New("record-file: " + o.RecordFile + " not found")
+		}
+		if o.TargetBucket == "" || o.SourceBucket == "" {
+			return errors.New("target-bucket and source-bucket are required when record-file is set")
+		}
 	}
 	return nil
 }

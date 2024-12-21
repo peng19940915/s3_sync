@@ -6,12 +6,14 @@ const (
 )
 
 const (
-	FailedRecordPath  = "failed_record.txt"
-	SuccessRecordPath = "success_record.txt"
+	FailedRecordPath  = "failed_record"
+	SuccessRecordPath = "success_record"
 )
 
 const (
 	S3CopyMaxRetries = 3
+	S3MaxCopyLimit   = 2000
+	S3CopyMaxWait    = 30
 )
 
 const (

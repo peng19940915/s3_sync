@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -17,6 +18,8 @@ import (
 	news3 "github.com/peng19940915/s3_sync/pkg/aws/s3"
 	"github.com/peng19940915/s3_sync/pkg/known"
 	"github.com/peng19940915/s3_sync/pkg/options"
+	"github.com/peng19940915/s3_sync/pkg/utils"
+	"github.com/schollz/progressbar/v3"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/time/rate"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -50,9 +53,9 @@ func NewSyncer(opts *options.SyncOptions) *Syncer {
 		workers:      opts.Workers,
 		prefix:       opts.Prefix,
 		recordFile:   opts.RecordFile,
-		//limiter:      rate.NewLimiter(rate.Limit(1000), 1000), // 每秒1000个请求
+		limiter:      rate.NewLimiter(rate.Limit(known.S3MaxCopyLimit), known.S3MaxCopyLimit), // 每秒2000个请求
 	}
-	s.loadCopiedKeys(fmt.Sprintf("%s_%s", known.SuccessRecordPath, s.sourceBucket))
+	s.loadCopiedKeys(fmt.Sprintf("%s_%s.txt", known.SuccessRecordPath, s.sourceBucket))
 	return s
 }
 
@@ -73,10 +76,10 @@ func (s *Syncer) loadCopiedKeys(filename string) error {
 }
 
 // Save a copied key to a file
-func (s *Syncer) saveKey(ctx context.Context, status string, keys <-chan string) error {
-	filename := fmt.Sprintf("%s_%s", known.SuccessRecordPath, s.sourceBucket)
+func (s *Syncer) saveKey(status string, keys <-chan string) error {
+	filename := fmt.Sprintf("%s_%s.txt", known.SuccessRecordPath, s.sourceBucket)
 	if status == known.FailedSyncStatus {
-		filename = fmt.Sprintf("%s_%s", known.FailedRecordPath, s.sourceBucket)
+		filename = fmt.Sprintf("%s_%s.txt", known.FailedRecordPath, s.sourceBucket)
 	}
 	file, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -87,27 +90,19 @@ func (s *Syncer) saveKey(ctx context.Context, status string, keys <-chan string)
 		hlog.Infof("flush data to: %s", filename)
 		writer.Flush() // 确保在关闭文件前刷新缓冲区
 		file.Close()   // 确保文件被关闭
-	}()
 
-	for {
-		select {
-		case key, ok := <-keys:
-			if !ok {
+	}()
+	for key := range keys {
+		if status == known.SuccessSyncStatus {
+			if _, ok := s.copiedKeys.Load(key); ok {
 				return nil
 			}
-			if status == known.SuccessSyncStatus {
-				if _, ok := s.copiedKeys.Load(key); ok {
-					continue
-				}
-			}
-			if _, err := writer.WriteString(key + "\n"); err != nil {
-				return err
-			}
-
-		case <-ctx.Done():
-			return nil
+		}
+		if _, err := writer.WriteString(key + "\n"); err != nil {
+			return err
 		}
 	}
+	return nil
 }
 
 func (s *Syncer) listObjects(ctx context.Context, tasks chan<- string) error {
@@ -140,12 +135,32 @@ func (s *Syncer) listObjects(ctx context.Context, tasks chan<- string) error {
 
 // 从文件中加载需要复制的key
 func (s *Syncer) listObjectsFromFile(ctx context.Context, tasks chan<- string) error {
+	totalLines, err := utils.CountFileLines(s.recordFile)
+	if err != nil {
+		return fmt.Errorf("failed to count lines: %w", err)
+	}
+
 	file, err := os.Open(s.recordFile)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 	reader := bufio.NewReaderSize(file, known.FileBufferSize)
+	// 创建进度条
+	bar := progressbar.NewOptions(totalLines,
+		progressbar.OptionShowCount(),
+		progressbar.OptionShowIts(), // 显示速率
+		progressbar.OptionSetWidth(15),
+		progressbar.OptionSetDescription("Syncing"),
+		progressbar.OptionThrottle(65*time.Millisecond), // 限制更新频率
+		progressbar.OptionSetRenderBlankState(true),
+		progressbar.OptionSetTheme(progressbar.Theme{
+			Saucer:        "=",
+			SaucerHead:    ">",
+			SaucerPadding: " ",
+			BarStart:      "[",
+			BarEnd:        "]",
+		}))
 	for {
 		line, isPrefix, err := reader.ReadLine()
 		if err != nil {
@@ -178,6 +193,7 @@ func (s *Syncer) listObjectsFromFile(ctx context.Context, tasks chan<- string) e
 		case <-ctx.Done():
 			return nil
 		}
+		bar.Add(1)
 	}
 	hlog.Infof("Finished load all key from file:%s", s.recordFile)
 	return nil
@@ -193,6 +209,7 @@ func (s *Syncer) CopyObjectWithRetry(ctx context.Context, key string) error {
 		}
 		// 尝试复制对象
 		if err := s.copyObject(ctx, key); err != nil {
+			hlog.Errorf("failed to copy object %s: %v, retrying...", key, err)
 			// 返回 false 继续重试
 			return false, nil
 		}
@@ -202,6 +219,9 @@ func (s *Syncer) CopyObjectWithRetry(ctx context.Context, key string) error {
 }
 
 func (s *Syncer) copyObject(ctx context.Context, key string) error {
+	if err := s.limiter.Wait(ctx); err != nil {
+		return fmt.Errorf("failed to wait for limiter: %w", err)
+	}
 	source := fmt.Sprintf("%s/%s", s.sourceBucket, key)
 	_, err := s.client.CopyObject(ctx, &s3.CopyObjectInput{
 		Bucket:            &s.targetBucket,
@@ -230,64 +250,79 @@ func (s *Syncer) copyObject(ctx context.Context, key string) error {
 	return nil
 }
 
-func (s *Syncer) Run(ctx context.Context) error {
+func (s *Syncer) Run(ctx context.Context, opts *options.SyncOptions) error {
 	var successCount, failureCount int64
 	ticker := time.NewTicker(time.Minute)
-
 	g, ctx := errgroup.WithContext(ctx)
 	keys := make(chan string, s.workers*2)
-	copiedKeys := make(chan string, 1000) // 用于存储已复制键的缓冲通道
-	failedKeys := make(chan string, 1000) // 用于存储失败键的缓冲通道
-	defer func() {
-		fmt.Println("relase source channel")
-		close(keys)
-		close(copiedKeys)
-		close(failedKeys)
-		defer ticker.Stop()
-	}()
+	copiedKeys := make(chan string, s.workers*2)
+	failedKeys := make(chan string, s.workers*2)
+
 	// Log the counts every minute
-	g.Go(func() error {
+	go func() error {
 		for {
 			select {
 			case <-ticker.C:
-				hlog.Infof("Cumulative Success: %d, Cumulative Failures: %d", successCount, failureCount)
+				if s.recordFile == "" {
+					hlog.Infof("Cumulative Success: %d, Cumulative Failures: %d", successCount, failureCount)
+				}
 			case <-ctx.Done():
 				return nil
 			}
 		}
-	})
-	g.Go(func() error {
-		return s.listObjects(ctx, keys)
-	})
-	g.Go(func() error {
-		return s.saveKey(ctx, known.SuccessSyncStatus, copiedKeys)
-	})
-	g.Go(func() error {
-		return s.saveKey(ctx, known.FailedSyncStatus, failedKeys)
-	})
+	}()
+
+	// Start listing objects
+	go func() error {
+		var err error
+		if opts.RecordFile != "" {
+			err = s.listObjectsFromFile(ctx, keys)
+		} else {
+			err = s.listObjects(ctx, keys)
+		}
+		close(keys)
+		return err
+	}()
 
 	for i := 0; i < s.workers; i++ {
 		g.Go(func() error {
-			for {
-				select {
-				case key, ok := <-keys:
-					if !ok {
-						return nil
+			for key := range keys {
+				if err := s.CopyObjectWithRetry(ctx, key); err != nil {
+					if err != context.Canceled {
+						failedKeys <- key
+						atomic.AddInt64(&failureCount, 1)
+						hlog.Errorf("failed to copy object %s: %v", key, err)
 					}
-					if err := s.CopyObjectWithRetry(ctx, key); err != nil {
-						if err != context.Canceled {
-							failedKeys <- key
-							failureCount++
-						}
-						continue
-					}
-					copiedKeys <- key
-					successCount++
-				case <-ctx.Done():
-					return nil
+					continue
 				}
+				copiedKeys <- key
+				atomic.AddInt64(&successCount, 1)
 			}
+			return nil
 		})
 	}
-	return g.Wait()
+
+	// Wait for all workers to finish, then close result channels
+	defer func() {
+		ticker.Stop()
+		hlog.Infof("Cumulative Success: %d, Cumulative Failures: %d", successCount, failureCount)
+	}()
+
+	saveWaitGroup := sync.WaitGroup{}
+	// Channel handlers remain the same
+	saveWaitGroup.Add(1)
+	go func() error {
+		defer saveWaitGroup.Done()
+		return s.saveKey(known.SuccessSyncStatus, copiedKeys)
+	}()
+	saveWaitGroup.Add(1)
+	go func() error {
+		defer saveWaitGroup.Done()
+		return s.saveKey(known.FailedSyncStatus, failedKeys)
+	}()
+	err := g.Wait()
+	close(copiedKeys)
+	close(failedKeys)
+	saveWaitGroup.Wait()
+	return err
 }
