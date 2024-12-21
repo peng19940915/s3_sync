@@ -88,7 +88,7 @@ func (s *Syncer) saveKey(status string, keys <-chan string) error {
 	writer := bufio.NewWriter(file)
 	defer func() {
 		hlog.Infof("flush data to: %s", filename)
-		writer.Flush() // 确保在关闭文件前刷新缓冲区
+		writer.Flush() // 确保在关��文件前刷新缓冲区
 		file.Close()   // 确保文件被关闭
 
 	}()
@@ -222,10 +222,11 @@ func (s *Syncer) copyObject(ctx context.Context, key string) error {
 	if err := s.limiter.Wait(ctx); err != nil {
 		return fmt.Errorf("failed to wait for limiter: %w", err)
 	}
-	source := fmt.Sprintf("%s/%s", s.sourceBucket, key)
+	// URL encode the source path
+	encodedSource := fmt.Sprintf("%s/%s", s.sourceBucket, utils.URLEncode(key))
 	_, err := s.client.CopyObject(ctx, &s3.CopyObjectInput{
 		Bucket:            &s.targetBucket,
-		CopySource:        &source,
+		CopySource:        &encodedSource,
 		Key:               &key,
 		MetadataDirective: types.MetadataDirectiveCopy,
 	})
