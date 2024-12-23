@@ -5,8 +5,10 @@ import (
 	"flag"
 	"fmt"
 
+	datapreprocess "github.com/peng19940915/s3_sync/pkg/data_preprocess"
 	"github.com/peng19940915/s3_sync/pkg/known"
 	"github.com/peng19940915/s3_sync/pkg/options"
+	"github.com/peng19940915/s3_sync/pkg/server"
 	"github.com/peng19940915/s3_sync/pkg/syncer"
 	"github.com/spf13/cobra"
 )
@@ -26,6 +28,9 @@ func NewCommand(ctx context.Context) *cobra.Command {
 			if err := opts.Validate(); err != nil {
 				return err
 			}
+			if opts.Mode == known.PreprocessModel {
+				return datapreprocess.ProcessS3Files(ctx, opts.DataPreprocessOptions.Bucket, opts.DataPreprocessOptions.Prefix, opts.DataPreprocessOptions.OutputFile)
+			}
 			return Run(ctx, opts)
 		},
 	}
@@ -37,6 +42,8 @@ func NewCommand(ctx context.Context) *cobra.Command {
 }
 
 func Run(ctx context.Context, opts *options.SyncOptions) error {
-	syncer := syncer.NewSyncer(opts)
+	syncer := syncer.NewSyncer(ctx, opts)
+	server := server.NewServer(&opts.ServerOpts)
+	go server.Run(ctx, &opts.ServerOpts)
 	return syncer.Run(ctx, opts)
 }

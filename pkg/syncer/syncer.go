@@ -3,9 +3,11 @@ package syncer
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	"github.com/cloudwego/hertz/pkg/common/hlog"
 	news3 "github.com/peng19940915/s3_sync/pkg/aws/s3"
 	"github.com/peng19940915/s3_sync/pkg/known"
@@ -37,6 +40,8 @@ type Syncer struct {
 	limiter      *rate.Limiter
 }
 
+var PathLimiter *PathLimiters
+
 // 任务对象池
 var objectPool = sync.Pool{
 	New: func() interface{} {
@@ -44,7 +49,8 @@ var objectPool = sync.Pool{
 	},
 }
 
-func NewSyncer(opts *options.SyncOptions) *Syncer {
+func NewSyncer(ctx context.Context, opts *options.SyncOptions) *Syncer {
+	//PathLimiter = NewPathLimiters(ctx)
 	var s = &Syncer{
 		client:       news3.NewClient(opts.Region),
 		sourceBucket: opts.SourceBucket,
@@ -88,7 +94,7 @@ func (s *Syncer) saveKey(status string, keys <-chan string) error {
 	writer := bufio.NewWriter(file)
 	defer func() {
 		hlog.Infof("flush data to: %s", filename)
-		writer.Flush() // 确保在关��文件前刷新缓冲区
+		writer.Flush() // 确保在关闭文件前刷新缓冲区
 		file.Close()   // 确保文件被关闭
 
 	}()
@@ -219,11 +225,13 @@ func (s *Syncer) CopyObjectWithRetry(ctx context.Context, key string) error {
 }
 
 func (s *Syncer) copyObject(ctx context.Context, key string) error {
-	if err := s.limiter.Wait(ctx); err != nil {
+	limiter := s.limiter
+	if err := limiter.Wait(ctx); err != nil {
 		return fmt.Errorf("failed to wait for limiter: %w", err)
 	}
-	// URL encode the source path
-	encodedSource := fmt.Sprintf("%s/%s", s.sourceBucket, utils.URLEncode(key))
+
+	encodedKey := utils.EncodeNonASCII(key)
+	encodedSource := fmt.Sprintf("%s/%s", s.sourceBucket, encodedKey)
 	_, err := s.client.CopyObject(ctx, &s3.CopyObjectInput{
 		Bucket:            &s.targetBucket,
 		CopySource:        &encodedSource,
@@ -232,23 +240,134 @@ func (s *Syncer) copyObject(ctx context.Context, key string) error {
 	})
 
 	if err != nil {
-		//var apiErr smithy.APIError
-		//if errors.As(err, &apiErr) {
-		//	switch {
-		//	case apiErr.ErrorCode() == "EntityTooLarge":
-		//		fmt.Printf("File exceeds 5GB limit: %s (size: %d bytes)\n", task.Key, task.Size)
-		// 这里可以添加记录逻辑
-		//	case apiErr.ErrorCode() == "InvalidRequest":
-		//		// 处理其他无效请求错误
-		//	case apiErr.ErrorCode() == "NoSuchKey":
-		//		// 处理源文件不存在的情况
-		//	}
-		//}
-		//TODO 记录错误
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) &&
+			(apiErr.ErrorCode() == "InvalidRequest" && strings.Contains(apiErr.Error(), "copy source is larger than the maximum allowable size")) {
+			return s.copyLargeObjectWithSize(ctx, key)
+		}
 		return fmt.Errorf("failed to copy object %s: %w", key, err)
 	}
 
 	return nil
+}
+
+func (s *Syncer) copyLargeObjectWithSize(ctx context.Context, key string) error {
+	// 获取文件大小
+	headOutput, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: &s.sourceBucket,
+		Key:    &key,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to get object size: %w", err)
+	}
+
+	const (
+		partSize      = 500 * 1024 * 1024 // 1GB per part
+		maxConcurrent = 20                // 最大并发数
+	)
+
+	totalSize := *headOutput.ContentLength
+	start := time.Now()
+
+	// 初始化分片上传
+	createOutput, err := s.client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket: &s.targetBucket,
+		Key:    &key,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create multipart upload: %w", err)
+	}
+
+	uploadID := createOutput.UploadId
+	numParts := (totalSize + partSize - 1) / partSize
+
+	// 用于存储完成的分片
+	var mu sync.Mutex
+	completedParts := make([]types.CompletedPart, 0, numParts)
+
+	// 使用 errgroup 进行并发控���
+	g, gctx := errgroup.WithContext(ctx)
+	sem := make(chan struct{}, maxConcurrent)
+
+	// 清理函数
+	defer func() {
+		if err != nil {
+			if abortErr := s.abortMultipartUpload(ctx, key, *uploadID); abortErr != nil {
+				hlog.Errorf("Failed to abort multipart upload: %v", abortErr)
+			}
+		}
+	}()
+
+	for i := int64(1); i <= numParts; i++ {
+		partNum := i
+		start := (i - 1) * partSize
+		end := min(start+partSize-1, totalSize-1)
+
+		g.Go(func() error {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			rangeStr := fmt.Sprintf("bytes=%d-%d", start, end)
+			encodedKey := utils.EncodeNonASCII(key)
+			encodedSource := fmt.Sprintf("%s/%s", s.sourceBucket, encodedKey)
+
+			copyPartOutput, err := s.client.UploadPartCopy(gctx, &s3.UploadPartCopyInput{
+				Bucket:          &s.targetBucket,
+				Key:             &key,
+				PartNumber:      aws.Int32(int32(partNum)),
+				UploadId:        uploadID,
+				CopySource:      aws.String(encodedSource),
+				CopySourceRange: &rangeStr,
+			})
+
+			if err != nil {
+				return fmt.Errorf("failed to copy part %d: %w", partNum, err)
+			}
+
+			mu.Lock()
+			completedParts = append(completedParts, types.CompletedPart{
+				ETag:       copyPartOutput.CopyPartResult.ETag,
+				PartNumber: aws.Int32(int32(partNum)),
+			})
+			mu.Unlock()
+
+			hlog.Infof("Completed part %d/%d for %s", partNum, numParts, key)
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return err
+	}
+
+	// 完成分片上传前先排序
+	sort.Slice(completedParts, func(i, j int) bool {
+		return *completedParts[i].PartNumber < *completedParts[j].PartNumber
+	})
+
+	// 完成分片上传
+	_, err = s.client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:          &s.targetBucket,
+		Key:             &key,
+		UploadId:        uploadID,
+		MultipartUpload: &types.CompletedMultipartUpload{Parts: completedParts},
+	})
+
+	duration := time.Since(start)
+	speed := float64(totalSize) / duration.Seconds() / 1024 / 1024 // MB/s
+	hlog.Infof("Large file copy completed: %s (%.2f GB) in %v, speed: %.2f MB/s",
+		key, float64(totalSize)/1024/1024/1024, duration, speed)
+
+	return err
+}
+
+func (s *Syncer) abortMultipartUpload(ctx context.Context, key, uploadID string) error {
+	_, err := s.client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket:   &s.targetBucket,
+		Key:      &key,
+		UploadId: &uploadID,
+	})
+	return err
 }
 
 func (s *Syncer) Run(ctx context.Context, opts *options.SyncOptions) error {
