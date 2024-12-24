@@ -3,6 +3,7 @@ package duckdb
 import (
 	"database/sql"
 	"fmt"
+	"math/rand"
 	"os"
 	"strings"
 	"sync"
@@ -14,16 +15,16 @@ import (
 
 // DuckStore 封装DuckDB操作
 type DuckStore struct {
-	conns      []*sql.DB    // 连接池
+	conns       []*sql.DB   // 连接池
 	insertStmts []*sql.Stmt // 每个连接对应的预处理语句
-	dbPath     string
-	batchSize  int
-	connMu     []sync.Mutex // 每个连接一个互斥锁
-	stats      struct {
-		totalRecords   int64
-		uniqueRecords  int64
-		writeTime      int64
-		connUsage     []int64  // 每个连接的使用次数
+	dbPath      string
+	batchSize   int
+	connMu      []sync.Mutex // 每个连接一个互斥锁
+	stats       struct {
+		totalRecords  int64
+		uniqueRecords int64
+		writeTime     int64
+		connUsage     []int64 // 每个连接的使用次数
 	}
 }
 
@@ -45,11 +46,11 @@ func NewDuckStore(cfg Config) (*DuckStore, error) {
 	}
 
 	store := &DuckStore{
-		conns:      make([]*sql.DB, cfg.Threads),
+		conns:       make([]*sql.DB, cfg.Threads),
 		insertStmts: make([]*sql.Stmt, cfg.Threads),
-		connMu:     make([]sync.Mutex, cfg.Threads),
-		dbPath:     cfg.DBPath,
-		batchSize:  cfg.BatchSize,
+		connMu:      make([]sync.Mutex, cfg.Threads),
+		dbPath:      cfg.DBPath,
+		batchSize:   cfg.BatchSize,
 	}
 	store.stats.connUsage = make([]int64, cfg.Threads)
 
@@ -60,7 +61,7 @@ func NewDuckStore(cfg Config) (*DuckStore, error) {
 	}
 
 	// 设置连接参数
-	db0.SetMaxOpenConns(1)  // 每个连接实例只允许一个活动连接
+	db0.SetMaxOpenConns(1) // 每个连接实例只允许一个活动连接
 	db0.SetMaxIdleConns(1)
 	db0.SetConnMaxLifetime(time.Hour)
 
@@ -95,12 +96,12 @@ func NewDuckStore(cfg Config) (*DuckStore, error) {
 			store.Close()
 			return nil, fmt.Errorf("打开DuckDB连接 %d 失败: %w", i, err)
 		}
-		
+
 		// 设置连接参数
 		db.SetMaxOpenConns(1)
 		db.SetMaxIdleConns(1)
 		db.SetConnMaxLifetime(time.Hour)
-		
+
 		store.conns[i] = db
 
 		stmt, err := db.Prepare(`
@@ -135,21 +136,26 @@ func (s *DuckStore) monitorConnections() {
 				fmt.Printf("连接 %d 使用次数: %d\n", i, count)
 			}
 		}
-		fmt.Printf("总写入次数: %d, 平均每个连接: %.2f\n", 
+		fmt.Printf("总写入次数: %d, 平均每个连接: %.2f\n",
 			total, float64(total)/float64(len(s.conns)))
 	}
 }
 
 // 获取最少使用的连接索引
 func (s *DuckStore) getLeastUsedConnIndex() int {
-	minUsage := atomic.LoadInt64(&s.stats.connUsage[0])
-	minIndex := 0
+	// 随机选择几个连接进行比较，而不是遍历所有连接
+	const sampleSize = 3
+	connCount := len(s.stats.connUsage)
 
-	for i := 1; i < len(s.stats.connUsage); i++ {
-		usage := atomic.LoadInt64(&s.stats.connUsage[i])
+	minIndex := rand.Intn(connCount)
+	minUsage := atomic.LoadInt64(&s.stats.connUsage[minIndex])
+
+	for i := 0; i < sampleSize-1; i++ {
+		idx := rand.Intn(connCount)
+		usage := atomic.LoadInt64(&s.stats.connUsage[idx])
 		if usage < minUsage {
 			minUsage = usage
-			minIndex = i
+			minIndex = idx
 		}
 	}
 
@@ -162,29 +168,26 @@ func (s *DuckStore) WriteBatch(values []string) error {
 		return nil
 	}
 
-	// 选择使用次数最少的连接
+	// 选择连接的操作移到锁外面
 	connIndex := s.getLeastUsedConnIndex()
-	
-	// 增加连接使用计数
 	atomic.AddInt64(&s.stats.connUsage[connIndex], 1)
-	
-	// 对选中的连接加锁
+
+	// 预分配内存也移到锁外面
+	batchSize := s.batchSize // 使用配置的batchSize
+	placeholders := make([]string, 0, batchSize)
+	args := make([]interface{}, 0, batchSize)
+
+	// 缩小锁的范围，只在实际写入时加锁
 	s.connMu[connIndex].Lock()
 	defer s.connMu[connIndex].Unlock()
 
 	startTime := time.Now()
 
-	// 使用选中的连接开启事务
 	tx, err := s.conns[connIndex].Begin()
 	if err != nil {
 		return fmt.Errorf("开启事务失败: %w", err)
 	}
 	defer tx.Rollback()
-
-	// 预分配内存
-	const batchSize = 1000
-	placeholders := make([]string, 0, batchSize)
-	args := make([]interface{}, 0, batchSize)
 
 	// 分批处理
 	for i := 0; i < len(values); i += batchSize {
