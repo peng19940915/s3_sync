@@ -19,9 +19,10 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"io"
-	"strings"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -29,11 +30,23 @@ import (
 	"github.com/peng19940915/s3_sync/pkg/duckdb"
 	"github.com/peng19940915/s3_sync/pkg/options"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/peng19940915/s3_sync/pkg/known"
 )
+
+// Add new manifest structure
+type ManifestFile struct {
+	Key         string `json:"key"`
+	Size        int64  `json:"size"`
+	MD5checksum string `json:"MD5checksum"`
+}
+
+type Manifest struct {
+	SourceBucket      string         `json:"sourceBucket"`
+	DestinationBucket string         `json:"destinationBucket"`
+	Files             []ManifestFile `json:"files"`
+}
 
 func ProcessS3Files(ctx context.Context, opts *options.SyncOptions) error {
 	duckCfg := duckdb.Config{
@@ -55,14 +68,27 @@ func ProcessS3Files(ctx context.Context, opts *options.SyncOptions) error {
 	}
 	client := s3.NewFromConfig(cfg)
 
+	// Read and parse manifest file
+	manifestData, err := os.ReadFile(opts.DataPreprocessOptions.ManifestFile)
+	if err != nil {
+		return fmt.Errorf("读取manifest文件失败: %w", err)
+	}
+
+	var manifest Manifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		return fmt.Errorf("解析manifest文件失败: %w", err)
+	}
+
+	// Initialize channels and counters
 	jobs := make(chan string, known.PreProcessMaxWorkersForS3)
 	results := make(chan []string, known.PreProcessMaxWorkersForS3)
-	errChan := make(chan error, known.PreProcessMaxWorkersForS3) // 统一使用一个错误通道
+	errChan := make(chan error, known.PreProcessMaxWorkersForS3)
 
 	var wg sync.WaitGroup
 	var processedFiles, totalFiles int64
+	totalFiles = int64(len(manifest.Files))
 
-	// 进度报告协程保持不变
+	// 进度报告协程
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -99,8 +125,7 @@ func ProcessS3Files(ctx context.Context, opts *options.SyncOptions) error {
 
 	// 启动写入协程
 	var writeWg sync.WaitGroup
-	// 创建多个写入协程
-	for i := 0; i < known.PreProcessMaxWorkersForS3; i++ { // 使用与读取相同数量的写入协程
+	for i := 0; i < known.PreProcessMaxWorkersForS3; i++ {
 		writeWg.Add(1)
 		go func() {
 			defer writeWg.Done()
@@ -119,12 +144,14 @@ func ProcessS3Files(ctx context.Context, opts *options.SyncOptions) error {
 		}()
 	}
 
-	// 发送任务
-	paginator := s3.NewListObjectsV2Paginator(client, &s3.ListObjectsV2Input{
-		Bucket:  &opts.DataPreprocessOptions.Bucket,
-		Prefix:  &opts.DataPreprocessOptions.Prefix,
-		MaxKeys: aws.Int32(1000),
-	})
+	// Send manifest files to jobs channel
+	for _, file := range manifest.Files {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case jobs <- file.Key:
+		}
+	}
 
 	// 错误检查函数
 	checkError := func() error {
@@ -133,29 +160,6 @@ func ProcessS3Files(ctx context.Context, opts *options.SyncOptions) error {
 			return err
 		default:
 			return nil
-		}
-	}
-
-	// 发送任务并检查错误
-	for paginator.HasMorePages() {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-			output, err := paginator.NextPage(ctx)
-			if err != nil {
-				return err
-			}
-			for _, obj := range output.Contents {
-				if strings.HasSuffix(*obj.Key, ".gz") {
-					atomic.AddInt64(&totalFiles, 1)
-					select {
-					case jobs <- *obj.Key:
-					case <-ctx.Done():
-						return nil
-					}
-				}
-			}
 		}
 	}
 
@@ -170,6 +174,7 @@ func ProcessS3Files(ctx context.Context, opts *options.SyncOptions) error {
 	if err := checkError(); err != nil {
 		return fmt.Errorf("处理失败: %w", err)
 	}
+
 	// 所有数据处理完成后，导出排序后的结果
 	if err := store.ExportSorted(opts.DataPreprocessOptions.OutputFile); err != nil {
 		return fmt.Errorf("导出排序数据失败: %w", err)
