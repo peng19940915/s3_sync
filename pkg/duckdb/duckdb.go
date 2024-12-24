@@ -14,15 +14,16 @@ import (
 
 // DuckStore 封装DuckDB操作
 type DuckStore struct {
-	db         *sql.DB
-	insertStmt *sql.Stmt
+	conns      []*sql.DB    // 连接池
+	insertStmts []*sql.Stmt // 每个连接对应的预处理语句
 	dbPath     string
 	batchSize  int
-	mu         sync.Mutex
+	connMu     []sync.Mutex // 每个连接一个互斥锁
 	stats      struct {
-		totalRecords  int64 // 处理的总记录数
-		uniqueRecords int64 // 唯一记录数
-		writeTime     int64 // 写入耗时（纳秒）
+		totalRecords   int64
+		uniqueRecords  int64
+		writeTime      int64
+		connUsage     []int64  // 每个连接的使用次数
 	}
 }
 
@@ -39,46 +40,120 @@ func NewDuckStore(cfg Config) (*DuckStore, error) {
 	if cfg.BatchSize <= 0 {
 		cfg.BatchSize = 100000
 	}
+	if cfg.Threads <= 0 {
+		cfg.Threads = 100 // 默认100个连接
+	}
 
-	// 使用标准 SQL 驱动打开数据库
-	db, err := sql.Open("duckdb", cfg.DBPath)
+	store := &DuckStore{
+		conns:      make([]*sql.DB, cfg.Threads),
+		insertStmts: make([]*sql.Stmt, cfg.Threads),
+		connMu:     make([]sync.Mutex, cfg.Threads),
+		dbPath:     cfg.DBPath,
+		batchSize:  cfg.BatchSize,
+	}
+	store.stats.connUsage = make([]int64, cfg.Threads)
+
+	// 初始化第一个连接并创建表
+	db0, err := sql.Open("duckdb", fmt.Sprintf("%s?threads=%d", cfg.DBPath, 4)) // 每个连接4个线程
 	if err != nil {
 		return nil, fmt.Errorf("打开DuckDB失败: %w", err)
 	}
 
-	// 设置连接池参数
-	db.SetMaxOpenConns(cfg.Threads)
-	db.SetMaxIdleConns(cfg.Threads)
+	// 设置连接参数
+	db0.SetMaxOpenConns(1)  // 每个连接实例只允许一个活动连接
+	db0.SetMaxIdleConns(1)
+	db0.SetConnMaxLifetime(time.Hour)
 
-	// 初始化数据库
-	_, err = db.Exec(`
+	// 创建表结构
+	_, err = db0.Exec(`
         CREATE TABLE IF NOT EXISTS records (
             value VARCHAR NOT NULL,
             PRIMARY KEY(value)
-        ) WITH (index_size=1024);
+        ) WITH (index_size=32768);
     `)
 	if err != nil {
-		db.Close()
+		db0.Close()
 		return nil, fmt.Errorf("初始化DuckDB失败: %w", err)
 	}
 
-	// 准备插入语句
-	stmt, err := db.Prepare(`
+	store.conns[0] = db0
+	stmt0, err := db0.Prepare(`
         INSERT INTO records (value)
         VALUES (?)
         ON CONFLICT(value) DO NOTHING
     `)
 	if err != nil {
-		db.Close()
+		db0.Close()
 		return nil, fmt.Errorf("准备插入语句失败: %w", err)
 	}
+	store.insertStmts[0] = stmt0
 
-	return &DuckStore{
-		db:         db,
-		insertStmt: stmt,
-		dbPath:     cfg.DBPath,
-		batchSize:  cfg.BatchSize,
-	}, nil
+	// 初始化其余连接
+	for i := 1; i < cfg.Threads; i++ {
+		db, err := sql.Open("duckdb", fmt.Sprintf("%s?threads=%d", cfg.DBPath, 4))
+		if err != nil {
+			store.Close()
+			return nil, fmt.Errorf("打开DuckDB连接 %d 失败: %w", i, err)
+		}
+		
+		// 设置连接参数
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+		db.SetConnMaxLifetime(time.Hour)
+		
+		store.conns[i] = db
+
+		stmt, err := db.Prepare(`
+            INSERT INTO records (value)
+            VALUES (?)
+            ON CONFLICT(value) DO NOTHING
+        `)
+		if err != nil {
+			store.Close()
+			return nil, fmt.Errorf("准备插入语句 %d 失败: %w", i, err)
+		}
+		store.insertStmts[i] = stmt
+	}
+
+	// 启动监控协程
+	go store.monitorConnections()
+
+	return store, nil
+}
+
+// 监控连接使用情况
+func (s *DuckStore) monitorConnections() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		var total int64
+		for i, usage := range s.stats.connUsage {
+			count := atomic.LoadInt64(&usage)
+			total += count
+			if count > 0 {
+				fmt.Printf("连接 %d 使用次数: %d\n", i, count)
+			}
+		}
+		fmt.Printf("总写入次数: %d, 平均每个连接: %.2f\n", 
+			total, float64(total)/float64(len(s.conns)))
+	}
+}
+
+// 获取最少使用的连接索引
+func (s *DuckStore) getLeastUsedConnIndex() int {
+	minUsage := atomic.LoadInt64(&s.stats.connUsage[0])
+	minIndex := 0
+
+	for i := 1; i < len(s.stats.connUsage); i++ {
+		usage := atomic.LoadInt64(&s.stats.connUsage[i])
+		if usage < minUsage {
+			minUsage = usage
+			minIndex = i
+		}
+	}
+
+	return minIndex
 }
 
 // WriteBatch 批量写入数据（自动去重）
@@ -87,13 +162,20 @@ func (s *DuckStore) WriteBatch(values []string) error {
 		return nil
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// 选择使用次数最少的连接
+	connIndex := s.getLeastUsedConnIndex()
+	
+	// 增加连接使用计数
+	atomic.AddInt64(&s.stats.connUsage[connIndex], 1)
+	
+	// 对选中的连接加锁
+	s.connMu[connIndex].Lock()
+	defer s.connMu[connIndex].Unlock()
 
 	startTime := time.Now()
 
-	// 开启事务
-	tx, err := s.db.Begin()
+	// 使用选中的连接开启事务
+	tx, err := s.conns[connIndex].Begin()
 	if err != nil {
 		return fmt.Errorf("开启事务失败: %w", err)
 	}
@@ -132,7 +214,6 @@ func (s *DuckStore) WriteBatch(values []string) error {
 		}
 	}
 
-	// 提交事务
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("提交事务失败: %w", err)
 	}
@@ -148,7 +229,7 @@ func (s *DuckStore) ExportSorted(outputFilePrefix string) error {
 
 	// 获取总记录数
 	var totalCount int64
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM records").Scan(&totalCount); err != nil {
+	if err := s.conns[0].QueryRow("SELECT COUNT(*) FROM records").Scan(&totalCount); err != nil {
 		return fmt.Errorf("获取记录数失败: %w", err)
 	}
 
@@ -168,7 +249,7 @@ func (s *DuckStore) ExportSorted(outputFilePrefix string) error {
             ) TO '%s' (FORMAT CSV)
         `, recordsPerFile, i*recordsPerFile, fileName)
 
-		if _, err := s.db.Exec(query); err != nil {
+		if _, err := s.conns[0].Exec(query); err != nil {
 			return fmt.Errorf("导出数据到文件 %s 失败: %w", fileName, err)
 		}
 
@@ -196,11 +277,10 @@ func (s *DuckStore) GetStats() (totalRecords, uniqueRecords int64, duplicateRate
 
 // Close 关闭数据库连接并清理临时文件
 func (s *DuckStore) Close() error {
-	if s.insertStmt != nil {
-		s.insertStmt.Close()
-	}
-	if s.db != nil {
-		s.db.Close()
+	for _, db := range s.conns {
+		if db != nil {
+			db.Close()
+		}
 	}
 	return os.Remove(s.dbPath)
 }
