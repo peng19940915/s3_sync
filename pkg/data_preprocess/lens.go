@@ -99,26 +99,25 @@ func ProcessS3Files(ctx context.Context, opts *options.SyncOptions) error {
 
 	// 启动写入协程
 	var writeWg sync.WaitGroup
-	writeWg.Add(1)
-	go func() {
-		defer writeWg.Done()
-
-		for paths := range results {
-			select {
-			case <-ctx.Done():
-				errChan <- ctx.Err()
-				fmt.Println("写入协程退出")
-				return
-			default:
-				if err := store.WriteBatch(paths); err != nil {
-					fmt.Println("写入协程失败")
-					errChan <- fmt.Errorf("写入DuckDB批量数据失败: %w", err)
+	// 创建多个写入协程
+	for i := 0; i < known.PreProcessMaxWorkersForS3; i++ { // 使用与读取相同数量的写入协程
+		writeWg.Add(1)
+		go func() {
+			defer writeWg.Done()
+			for paths := range results {
+				select {
+				case <-ctx.Done():
+					errChan <- ctx.Err()
 					return
+				default:
+					if err := store.WriteBatch(paths); err != nil {
+						errChan <- fmt.Errorf("写入DuckDB批量数据失败: %w", err)
+						return
+					}
 				}
 			}
-		}
-
-	}()
+		}()
+	}
 
 	// 发送任务
 	paginator := s3.NewListObjectsV2Paginator(client, &s3.ListObjectsV2Input{
