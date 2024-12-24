@@ -19,6 +19,35 @@
 ## Limitation
 * The S3 Copy API has a rate limit of 500 requests per second.
 * The S3 Copy API has a rate limit of 500 requests per second.
+
+## DuckDB
+### Mac 
+```
+brew install duckdb
+# Check installation location
+brew list duckdb
+
+# Set DuckDB library path
+export CGO_ENABLED=1
+export CGO_LDFLAGS="-L/opt/homebrew/lib -lduckdb"
+export CGO_CFLAGS="-I/opt/homebrew/include"
+# if you use intel chip mac, path is different.
+export CGO_LDFLAGS="-L/usr/local/lib -lduckdb"
+export CGO_CFLAGS="-I/usr/local/include"
+```
+
+### Ubuntu/Debian
+```
+# Add DuckDB apt repository
+sudo apt-get update
+sudo apt-get install -y software-properties-common
+sudo add-apt-repository ppa:duckdb/duckdb
+
+# Install DuckDB
+sudo apt-get update
+sudo apt-get install -y libduckdb0 libduckdb-dev
+```
+
 ## Usage
 ```
 # sync -h

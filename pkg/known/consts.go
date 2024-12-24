@@ -28,3 +28,9 @@ const (
 	PreprocessModel = "preprocess"
 	SyncModel       = "sync"
 )
+
+const (
+	DUCKDB_MEM_LIMIT = "8GB"
+	DUCKDB_PATH      = "duckdb.db"
+	DUCKDB_THREADS   = 20
+)

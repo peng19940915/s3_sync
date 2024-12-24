@@ -14,46 +14,47 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build .
 
 */
 import (
-	"bufio"
 	"compress/gzip"
 	"context"
 	"encoding/csv"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/peng19940915/s3_sync/pkg/duckdb"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/peng19940915/s3_sync/pkg/known"
 )
 
 const (
-	maxWorkers  = 10        // 并发下载的worker数量
-	bufferSize  = 32 * 1024 // 32KB buffer
-	outputBatch = 1000      // 输出缓冲行数
+	maxWorkers  = 10    // 并发下载的worker数量
+	outputBatch = 50000 // 输出缓冲行数
 )
 
 func ProcessS3Files(ctx context.Context, bucket, prefix, outputFile string) error {
+	duckCfg := duckdb.Config{
+		MemLimit: known.DUCKDB_MEM_LIMIT,
+		DBPath:   known.DUCKDB_PATH,
+		Threads:  known.DUCKDB_THREADS,
+	}
+	store, err := duckdb.NewDuckStore(duckCfg)
+	if err != nil {
+		return fmt.Errorf("初始化 DuckDB 失败: %w", err)
+	}
+	defer store.Close()
+
 	// 配置AWS客户端
 	cfg, err := config.LoadDefaultConfig(context.TODO())
 	if err != nil {
 		return fmt.Errorf("无法加载AWS配置: %w", err)
 	}
 	client := s3.NewFromConfig(cfg)
-
-	// 创建输出文件
-	output, err := os.Create(outputFile)
-	if err != nil {
-		return fmt.Errorf("创建输出文件失败: %w", err)
-	}
-	defer output.Close()
-
-	writer := bufio.NewWriterSize(output, bufferSize)
-	defer writer.Flush()
 
 	// 简化为只使用必要的通道
 	jobs := make(chan string, maxWorkers)
@@ -103,31 +104,22 @@ func ProcessS3Files(ctx context.Context, bucket, prefix, outputFile string) erro
 	writeWg.Add(1)
 	go func() {
 		defer writeWg.Done()
-		buffer := make([]string, 0, outputBatch)
 
 		for paths := range results {
 			select {
 			case <-ctx.Done():
 				errChan <- ctx.Err()
+				fmt.Println("写入协程退出")
 				return
 			default:
-				buffer = append(buffer, paths...)
-				if len(buffer) >= outputBatch {
-					if err := writeLines(writer, buffer); err != nil {
-						errChan <- err
-						return
-					}
-					buffer = buffer[:0]
+				if err := store.WriteBatch(paths); err != nil {
+					fmt.Println("写入协程失败")
+					errChan <- fmt.Errorf("写入DuckDB批量数据失败: %w", err)
+					return
 				}
 			}
 		}
 
-		// 写入剩余的数据
-		if len(buffer) > 0 {
-			if err := writeLines(writer, buffer); err != nil {
-				errChan <- err
-			}
-		}
 	}()
 
 	// 发送任务
@@ -153,21 +145,18 @@ func ProcessS3Files(ctx context.Context, bucket, prefix, outputFile string) erro
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
-			page, err := paginator.NextPage(ctx)
+			output, err := paginator.NextPage(ctx)
 			if err != nil {
-				return fmt.Errorf("列出S3对象失败: %w", err)
+				return err
 			}
-
-			for _, obj := range page.Contents {
+			for _, obj := range output.Contents {
 				if strings.HasSuffix(*obj.Key, ".gz") {
 					atomic.AddInt64(&totalFiles, 1)
-
-					// 检查是否有错误发生
-					if err := checkError(); err != nil {
-						return fmt.Errorf("处理失败: %w", err)
+					select {
+					case jobs <- *obj.Key:
+					case <-ctx.Done():
+						return nil
 					}
-
-					jobs <- *obj.Key
 				}
 			}
 		}
@@ -176,6 +165,7 @@ func ProcessS3Files(ctx context.Context, bucket, prefix, outputFile string) erro
 	// 关闭任务通道并等待所有处理完成
 	close(jobs)
 	wg.Wait()
+
 	close(results)
 	writeWg.Wait()
 
@@ -183,38 +173,16 @@ func ProcessS3Files(ctx context.Context, bucket, prefix, outputFile string) erro
 	if err := checkError(); err != nil {
 		return fmt.Errorf("处理失败: %w", err)
 	}
-	fmt.Println("处理完成")
-	return nil
-}
-
-func processS3Object(ctx context.Context, client *s3.Client, bucket string, jobs <-chan string, results chan<- []string, errors chan<- error,
-	currentFiles map[string]bool, currentFilesMutex *sync.Mutex, processedFiles *int64) {
-	for key := range jobs {
-		select {
-		case <-ctx.Done():
-			errors <- ctx.Err()
-			return
-		default:
-			fmt.Printf("正在处理文件: %s\n", key)
-			currentFilesMutex.Lock()
-			currentFiles[key] = true
-			currentFilesMutex.Unlock()
-
-			// 下载并处理文件
-			if err := processFile(ctx, client, bucket, key, results); err != nil {
-				errors <- err
-				return
-			}
-
-			// 从当前处理文件列表中移除
-			currentFilesMutex.Lock()
-			delete(currentFiles, key)
-			currentFilesMutex.Unlock()
-
-			// 更新处理文件计数
-			atomic.AddInt64(processedFiles, 1)
-		}
+	// 所有数据处理完成后，导出排序后的结果
+	if err := store.ExportSorted(outputFile); err != nil {
+		return fmt.Errorf("导出排序数据失败: %w", err)
 	}
+	// 输出统计信息
+	total, unique, dupRate := store.GetStats()
+	fmt.Printf("处理完成:\n总记录数: %d\n唯一记录数: %d\n重复率: %.2f%%\n",
+		total, unique, dupRate)
+
+	return nil
 }
 
 // 新增函数，用于分批处理文件内容
@@ -278,13 +246,4 @@ func processFile(ctx context.Context, client *s3.Client, bucket, key string, res
 	}
 	fmt.Println(fmt.Sprintf("处理完成 %s", key))
 	return nil
-}
-
-func writeLines(writer *bufio.Writer, lines []string) error {
-	for _, line := range lines {
-		if _, err := fmt.Fprintln(writer, line); err != nil {
-			return err
-		}
-	}
-	return writer.Flush()
 }

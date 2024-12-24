@@ -1,1 +1,0 @@
-data/model/sam/mid_ratio_1_1_process.zip
