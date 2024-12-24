@@ -152,7 +152,7 @@ func (s *DuckStore) Export(outputFilePrefix string) error {
 		return fmt.Errorf("获取记录数失败: %w", err)
 	}
 
-	const recordsPerFile = 10_000_000 // 每个文件1000万条记录
+	const recordsPerFile = 50_000_000 // 每个文件5000万条记录
 	fileCount := (totalCount + recordsPerFile - 1) / recordsPerFile
 
 	// 直接使用 LIMIT 和 OFFSET 进行分页导出
