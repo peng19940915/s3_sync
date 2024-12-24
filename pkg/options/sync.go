@@ -19,6 +19,7 @@ type SyncOptions struct {
 	ServerOpts            ServerOptions
 	DataPreprocessOptions DataPreprocessOptions
 	Mode                  string
+	DuckDBOpts            DuckDBOptions
 }
 
 type ServerOptions struct {
@@ -30,6 +31,12 @@ type DataPreprocessOptions struct {
 	Bucket     string
 	OutputFile string
 	Prefix     string
+}
+
+type DuckDBOptions struct {
+	MemLimit string
+	DBPath   string
+	Threads  int
 }
 
 func NewSyncOptions() *SyncOptions {
@@ -51,6 +58,10 @@ func (o *SyncOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.DataPreprocessOptions.Bucket, "lens-bucket", "", "Input Bucket")
 	fs.StringVar(&o.DataPreprocessOptions.OutputFile, "lens-output-file", "", "Output file")
 	fs.StringVar(&o.DataPreprocessOptions.Prefix, "lens-prefix", "", "Storage Lens prefix")
+	// duckdb
+	fs.StringVar(&o.DuckDBOpts.MemLimit, "duckdb-mem-limit", known.DUCKDB_MEM_LIMIT, "DuckDB mem limit")
+	fs.StringVar(&o.DuckDBOpts.DBPath, "duckdb-db-path", known.DUCKDB_PATH, "DuckDB db path")
+	fs.IntVar(&o.DuckDBOpts.Threads, "duckdb-threads", known.DUCKDB_THREADS, "DuckDB threads")
 }
 
 func (o *SyncOptions) Validate() error {

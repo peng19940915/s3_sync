@@ -34,3 +34,8 @@ const (
 	DUCKDB_PATH      = "duckdb.db"
 	DUCKDB_THREADS   = 20
 )
+
+const (
+	PreProcessMaxWorkersForS3 = 10
+	PreProcessOutputBatch     = 50000 // 输出缓冲行数
+)

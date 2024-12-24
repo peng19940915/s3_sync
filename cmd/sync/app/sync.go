@@ -29,7 +29,7 @@ func NewCommand(ctx context.Context) *cobra.Command {
 				return err
 			}
 			if opts.Mode == known.PreprocessModel {
-				return datapreprocess.ProcessS3Files(ctx, opts.DataPreprocessOptions.Bucket, opts.DataPreprocessOptions.Prefix, opts.DataPreprocessOptions.OutputFile)
+				return datapreprocess.ProcessS3Files(ctx, opts)
 			}
 			return Run(ctx, opts)
 		},

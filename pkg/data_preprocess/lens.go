@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/peng19940915/s3_sync/pkg/duckdb"
+	"github.com/peng19940915/s3_sync/pkg/options"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -32,16 +33,11 @@ import (
 	"github.com/peng19940915/s3_sync/pkg/known"
 )
 
-const (
-	maxWorkers  = 10    // 并发下载的worker数量
-	outputBatch = 50000 // 输出缓冲行数
-)
-
-func ProcessS3Files(ctx context.Context, bucket, prefix, outputFile string) error {
+func ProcessS3Files(ctx context.Context, opts *options.SyncOptions) error {
 	duckCfg := duckdb.Config{
-		MemLimit: known.DUCKDB_MEM_LIMIT,
-		DBPath:   known.DUCKDB_PATH,
-		Threads:  known.DUCKDB_THREADS,
+		MemLimit: opts.DuckDBOpts.MemLimit,
+		DBPath:   opts.DuckDBOpts.DBPath,
+		Threads:  opts.DuckDBOpts.Threads,
 	}
 	store, err := duckdb.NewDuckStore(duckCfg)
 	if err != nil {
@@ -57,9 +53,9 @@ func ProcessS3Files(ctx context.Context, bucket, prefix, outputFile string) erro
 	client := s3.NewFromConfig(cfg)
 
 	// 简化为只使用必要的通道
-	jobs := make(chan string, maxWorkers)
-	results := make(chan []string, maxWorkers)
-	errChan := make(chan error, maxWorkers) // 统一使用一个错误通道
+	jobs := make(chan string, known.PreProcessMaxWorkersForS3)
+	results := make(chan []string, known.PreProcessMaxWorkersForS3)
+	errChan := make(chan error, known.PreProcessMaxWorkersForS3) // 统一使用一个错误通道
 
 	var wg sync.WaitGroup
 	var processedFiles, totalFiles int64
@@ -85,12 +81,12 @@ func ProcessS3Files(ctx context.Context, bucket, prefix, outputFile string) erro
 	}()
 
 	// 启动工作协程
-	for i := 0; i < maxWorkers; i++ {
+	for i := 0; i < known.PreProcessMaxWorkersForS3; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for key := range jobs {
-				if err := processFile(ctx, client, bucket, key, results); err != nil {
+				if err := processFile(ctx, client, opts.DataPreprocessOptions.Bucket, key, results); err != nil {
 					errChan <- err
 					return
 				}
@@ -124,8 +120,8 @@ func ProcessS3Files(ctx context.Context, bucket, prefix, outputFile string) erro
 
 	// 发送任务
 	paginator := s3.NewListObjectsV2Paginator(client, &s3.ListObjectsV2Input{
-		Bucket:  &bucket,
-		Prefix:  &prefix,
+		Bucket:  &opts.DataPreprocessOptions.Bucket,
+		Prefix:  &opts.DataPreprocessOptions.Prefix,
 		MaxKeys: aws.Int32(1000),
 	})
 
@@ -174,7 +170,7 @@ func ProcessS3Files(ctx context.Context, bucket, prefix, outputFile string) erro
 		return fmt.Errorf("处理失败: %w", err)
 	}
 	// 所有数据处理完成后，导出排序后的结果
-	if err := store.ExportSorted(outputFile); err != nil {
+	if err := store.ExportSorted(opts.DataPreprocessOptions.OutputFile); err != nil {
 		return fmt.Errorf("导出排序数据失败: %w", err)
 	}
 	// 输出统计信息
@@ -208,7 +204,7 @@ func processFile(ctx context.Context, client *s3.Client, bucket, key string, res
 	csvReader := csv.NewReader(gzReader)
 
 	// 使用固定大小的批处理
-	batch := make([]string, 0, outputBatch)
+	batch := make([]string, 0, known.PreProcessOutputBatch)
 
 	// 逐行读取并批量发送
 	for {
@@ -224,13 +220,13 @@ func processFile(ctx context.Context, client *s3.Client, bucket, key string, res
 			batch = append(batch, record[1])
 
 			// 当批次达到指定大小时发送
-			if len(batch) >= outputBatch {
+			if len(batch) >= known.PreProcessOutputBatch {
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
 				case results <- batch:
 					// 创建新的批次
-					batch = make([]string, 0, outputBatch)
+					batch = make([]string, 0, known.PreProcessOutputBatch)
 				}
 			}
 		}
