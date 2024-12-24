@@ -24,7 +24,6 @@ type DuckStore struct {
 		totalRecords  int64
 		uniqueRecords int64
 		writeTime     int64
-		connUsage     []int64 // 每个连接的使用次数
 	}
 }
 
@@ -52,7 +51,6 @@ func NewDuckStore(cfg Config) (*DuckStore, error) {
 		dbPath:      cfg.DBPath,
 		batchSize:   cfg.BatchSize,
 	}
-	store.stats.connUsage = make([]int64, cfg.Threads)
 
 	// 初始化第一个连接并创建表
 	db0, err := sql.Open("duckdb", fmt.Sprintf("%s?threads=%d", cfg.DBPath, 4)) // 每个连接4个线程
@@ -116,50 +114,12 @@ func NewDuckStore(cfg Config) (*DuckStore, error) {
 		store.insertStmts[i] = stmt
 	}
 
-	// 启动监控协程
-	go store.monitorConnections()
-
 	return store, nil
-}
-
-// 监控连接使用情况
-func (s *DuckStore) monitorConnections() {
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		var total int64
-		for i, usage := range s.stats.connUsage {
-			count := atomic.LoadInt64(&usage)
-			total += count
-			if count > 0 {
-				fmt.Printf("连接 %d 使用次数: %d\n", i, count)
-			}
-		}
-		fmt.Printf("总写入次数: %d, 平均每个连接: %.2f\n",
-			total, float64(total)/float64(len(s.conns)))
-	}
 }
 
 // 获取最少使用的连接索引
 func (s *DuckStore) getLeastUsedConnIndex() int {
-	// 随机选择几个连接进行比较，而不是遍历所有连接
-	const sampleSize = 3
-	connCount := len(s.stats.connUsage)
-
-	minIndex := rand.Intn(connCount)
-	minUsage := atomic.LoadInt64(&s.stats.connUsage[minIndex])
-
-	for i := 0; i < sampleSize-1; i++ {
-		idx := rand.Intn(connCount)
-		usage := atomic.LoadInt64(&s.stats.connUsage[idx])
-		if usage < minUsage {
-			minUsage = usage
-			minIndex = idx
-		}
-	}
-
-	return minIndex
+	return rand.Intn(len(s.conns))
 }
 
 // WriteBatch 批量写入数据（自动去重）
@@ -170,7 +130,6 @@ func (s *DuckStore) WriteBatch(values []string) error {
 
 	// 选择连接的操作移到锁外面
 	connIndex := s.getLeastUsedConnIndex()
-	atomic.AddInt64(&s.stats.connUsage[connIndex], 1)
 
 	// 预分配内存也移到锁外面
 	batchSize := s.batchSize // 使用配置的batchSize
