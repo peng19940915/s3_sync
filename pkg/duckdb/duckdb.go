@@ -155,24 +155,53 @@ func (s *DuckStore) ExportSorted(outputFilePrefix string) error {
 	const recordsPerFile = 50_000_000 // 每个文件5000万条记录
 	fileCount := (totalCount + recordsPerFile - 1) / recordsPerFile
 
-	for i := int64(0); i < fileCount; i++ {
-		fileName := fmt.Sprintf("%s_%03d.txt", outputFilePrefix, i+1)
+	// 使用窗口函数进行分片导出
+	query := fmt.Sprintf(`
+        WITH numbered_records AS (
+            SELECT 
+                value,
+                (row_number() OVER (ORDER BY value) - 1) / %d + 1 as file_number
+            FROM records
+        )
+        SELECT file_number, 
+               '%s_' || lpad(file_number::VARCHAR, 3, '0') || '.txt' as filename
+        FROM numbered_records
+        GROUP BY file_number
+        ORDER BY file_number;
+    `, recordsPerFile, outputFilePrefix)
 
-		// 使用COPY命令导出当前批次
-		query := fmt.Sprintf(`
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return fmt.Errorf("创建导出计划失败: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var fileNumber int64
+		var fileName string
+		if err := rows.Scan(&fileNumber, &fileName); err != nil {
+			return fmt.Errorf("读取导出计划失败: %w", err)
+		}
+
+		exportQuery := fmt.Sprintf(`
             COPY (
+                WITH numbered_records AS (
+                    SELECT value,
+                           (row_number() OVER (ORDER BY value) - 1) / %d + 1 as file_number
+                    FROM records
+                )
                 SELECT value 
-                FROM records 
+                FROM numbered_records 
+                WHERE file_number = %d
                 ORDER BY value
-                LIMIT %d OFFSET %d
-            ) TO '%s' (FORMAT CSV)
-        `, recordsPerFile, i*recordsPerFile, fileName)
+            ) TO '%s' (FORMAT CSV);
+        `, recordsPerFile, fileNumber, fileName)
 
-		if _, err := s.db.Exec(query); err != nil {
+		if _, err := s.db.Exec(exportQuery); err != nil {
 			return fmt.Errorf("导出数据到文件 %s 失败: %w", fileName, err)
 		}
 
-		fmt.Printf("\r导出进度: %.2f%% (文件 %d/%d)", float64(i+1)/float64(fileCount)*100, i+1, fileCount)
+		fmt.Printf("\r导出进度: %.2f%% (文件 %d/%d)", float64(fileNumber)/float64(fileCount)*100, fileNumber, fileCount)
 	}
 	fmt.Println() // 换行
 
