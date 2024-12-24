@@ -30,5 +30,5 @@ const (
 )
 
 const (
-	PreProcessMaxWorkersForS3 = 10 // 并发从S3下载数据
+	PreProcessMaxWorkersForS3 = 50 // 并发从S3下载数据
 )

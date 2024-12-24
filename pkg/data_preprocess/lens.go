@@ -12,6 +12,8 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build .
 
 ./sync -f test.txt -s dywx-aigc-temp -t mobiu-dywx-aigc-temp -w 10
 
+CGO_ENABLED=1 CGO_LDFLAGS="-L/home/ec2-user/leiyupeng/duckdb/libs" go build -tags=duckdb_use_lib main.go
+
 */
 import (
 	"compress/gzip"
