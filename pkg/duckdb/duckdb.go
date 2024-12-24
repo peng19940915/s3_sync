@@ -155,46 +155,18 @@ func (s *DuckStore) Export(outputFilePrefix string) error {
 	const recordsPerFile = 10_000_000 // 每个文件1000万条记录
 	fileCount := (totalCount + recordsPerFile - 1) / recordsPerFile
 
-	// 简化查询，移除 ORDER BY
-	query := fmt.Sprintf(`
-        WITH numbered_records AS (
-            SELECT 
-                value,
-                (row_number() OVER ()) / %d + 1 as file_number
-            FROM records
-        )
-        SELECT file_number, 
-               '%s_' || lpad(file_number::VARCHAR, 3, '0') || '.txt' as filename
-        FROM numbered_records
-        GROUP BY file_number;
-    `, recordsPerFile, outputFilePrefix)
+	// 直接使用 LIMIT 和 OFFSET 进行分页导出
+	for fileNumber := int64(1); fileNumber <= fileCount; fileNumber++ {
+		fileName := fmt.Sprintf("%s_%03d.txt", outputFilePrefix, fileNumber)
+		offset := (fileNumber - 1) * recordsPerFile
 
-	rows, err := s.db.Query(query)
-	if err != nil {
-		return fmt.Errorf("创建导出计划失败: %w", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var fileNumber int64
-		var fileName string
-		if err := rows.Scan(&fileNumber, &fileName); err != nil {
-			return fmt.Errorf("读取导出计划失败: %w", err)
-		}
-
-		// 简化导出查询，移除排序
 		exportQuery := fmt.Sprintf(`
             COPY (
-                WITH numbered_records AS (
-                    SELECT value,
-                           (row_number() OVER ()) / %d + 1 as file_number
-                    FROM records
-                )
                 SELECT value 
-                FROM numbered_records 
-                WHERE file_number = %d
+                FROM records 
+                LIMIT %d OFFSET %d
             ) TO '%s' (FORMAT CSV);
-        `, recordsPerFile, fileNumber, fileName)
+        `, recordsPerFile, offset, fileName)
 
 		if _, err := s.db.Exec(exportQuery); err != nil {
 			return fmt.Errorf("导出数据到文件 %s 失败: %w", fileName, err)
