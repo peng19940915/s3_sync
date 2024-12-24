@@ -142,8 +142,8 @@ func (s *DuckStore) WriteBatch(values []string) error {
 	return nil
 }
 
-// ExportSorted 导出排序后的数据到多个文件
-func (s *DuckStore) ExportSorted(outputFilePrefix string) error {
+// Export 改名为 Export，移除排序逻辑
+func (s *DuckStore) Export(outputFilePrefix string) error {
 	startTime := time.Now()
 
 	// 获取总记录数
@@ -152,22 +152,21 @@ func (s *DuckStore) ExportSorted(outputFilePrefix string) error {
 		return fmt.Errorf("获取记录数失败: %w", err)
 	}
 
-	const recordsPerFile = 50_000_000 // 每个文件5000万条记录
+	const recordsPerFile = 10_000_000 // 每个文件1000万条记录
 	fileCount := (totalCount + recordsPerFile - 1) / recordsPerFile
 
-	// 使用窗口函数进行分片导出
+	// 简化查询，移除 ORDER BY
 	query := fmt.Sprintf(`
         WITH numbered_records AS (
             SELECT 
                 value,
-                (row_number() OVER (ORDER BY value) - 1) / %d + 1 as file_number
+                (row_number() OVER ()) / %d + 1 as file_number
             FROM records
         )
         SELECT file_number, 
                '%s_' || lpad(file_number::VARCHAR, 3, '0') || '.txt' as filename
         FROM numbered_records
-        GROUP BY file_number
-        ORDER BY file_number;
+        GROUP BY file_number;
     `, recordsPerFile, outputFilePrefix)
 
 	rows, err := s.db.Query(query)
@@ -183,17 +182,17 @@ func (s *DuckStore) ExportSorted(outputFilePrefix string) error {
 			return fmt.Errorf("读取导出计划失败: %w", err)
 		}
 
+		// 简化导出查询，移除排序
 		exportQuery := fmt.Sprintf(`
             COPY (
                 WITH numbered_records AS (
                     SELECT value,
-                           (row_number() OVER (ORDER BY value) - 1) / %d + 1 as file_number
+                           (row_number() OVER ()) / %d + 1 as file_number
                     FROM records
                 )
                 SELECT value 
                 FROM numbered_records 
                 WHERE file_number = %d
-                ORDER BY value
             ) TO '%s' (FORMAT CSV);
         `, recordsPerFile, fileNumber, fileName)
 
