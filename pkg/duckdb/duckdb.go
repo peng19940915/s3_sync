@@ -3,7 +3,6 @@ package duckdb
 import (
 	"database/sql"
 	"fmt"
-	"math/rand"
 	"os"
 	"strings"
 	"sync"
@@ -15,15 +14,15 @@ import (
 
 // DuckStore 封装DuckDB操作
 type DuckStore struct {
-	conns       []*sql.DB   // 连接池
-	insertStmts []*sql.Stmt // 每个连接对应的预处理语句
-	dbPath      string
-	batchSize   int
-	connMu      []sync.Mutex // 每个连接一个互斥锁
-	stats       struct {
-		totalRecords  int64
-		uniqueRecords int64
-		writeTime     int64
+	db         *sql.DB
+	insertStmt *sql.Stmt
+	dbPath     string
+	batchSize  int
+	mu         sync.Mutex
+	stats      struct {
+		totalRecords  int64 // 处理的总记录数
+		uniqueRecords int64 // 唯一记录数
+		writeTime     int64 // 写入耗时（纳秒）
 	}
 }
 
@@ -40,86 +39,46 @@ func NewDuckStore(cfg Config) (*DuckStore, error) {
 	if cfg.BatchSize <= 0 {
 		cfg.BatchSize = 100000
 	}
-	if cfg.Threads <= 0 {
-		cfg.Threads = 100 // 默认100个连接
-	}
 
-	store := &DuckStore{
-		conns:       make([]*sql.DB, cfg.Threads),
-		insertStmts: make([]*sql.Stmt, cfg.Threads),
-		connMu:      make([]sync.Mutex, cfg.Threads),
-		dbPath:      cfg.DBPath,
-		batchSize:   cfg.BatchSize,
-	}
-
-	// 初始化第一个连接并创建表
-	db0, err := sql.Open("duckdb", fmt.Sprintf("%s?threads=%d", cfg.DBPath, 4)) // 每个连接4个线程
+	// 使用标准 SQL 驱动打开数据库
+	db, err := sql.Open("duckdb", cfg.DBPath)
 	if err != nil {
 		return nil, fmt.Errorf("打开DuckDB失败: %w", err)
 	}
 
-	// 设置连接参数
-	db0.SetMaxOpenConns(1) // 每个连接实例只允许一个活动连接
-	db0.SetMaxIdleConns(1)
-	db0.SetConnMaxLifetime(time.Hour)
+	// 设置连接池参数
+	db.SetMaxOpenConns(cfg.Threads)
+	db.SetMaxIdleConns(cfg.Threads)
 
-	// 创建表结构
-	_, err = db0.Exec(`
+	// 初始化数据库
+	_, err = db.Exec(`
         CREATE TABLE IF NOT EXISTS records (
             value VARCHAR NOT NULL,
             PRIMARY KEY(value)
-        ) WITH (index_size=32768);
+        ) WITH (index_size=1024);
     `)
 	if err != nil {
-		db0.Close()
+		db.Close()
 		return nil, fmt.Errorf("初始化DuckDB失败: %w", err)
 	}
 
-	store.conns[0] = db0
-	stmt0, err := db0.Prepare(`
+	// 准备插入语句
+	stmt, err := db.Prepare(`
         INSERT INTO records (value)
         VALUES (?)
         ON CONFLICT(value) DO NOTHING
     `)
 	if err != nil {
-		db0.Close()
+		db.Close()
 		return nil, fmt.Errorf("准备插入语句失败: %w", err)
 	}
-	store.insertStmts[0] = stmt0
 
-	// 初始化其余连接
-	for i := 1; i < cfg.Threads; i++ {
-		db, err := sql.Open("duckdb", fmt.Sprintf("%s?threads=%d", cfg.DBPath, 4))
-		if err != nil {
-			store.Close()
-			return nil, fmt.Errorf("打开DuckDB连接 %d 失败: %w", i, err)
-		}
-
-		// 设置连接参数
-		db.SetMaxOpenConns(1)
-		db.SetMaxIdleConns(1)
-		db.SetConnMaxLifetime(time.Hour)
-
-		store.conns[i] = db
-
-		stmt, err := db.Prepare(`
-            INSERT INTO records (value)
-            VALUES (?)
-            ON CONFLICT(value) DO NOTHING
-        `)
-		if err != nil {
-			store.Close()
-			return nil, fmt.Errorf("准备插入语句 %d 失败: %w", i, err)
-		}
-		store.insertStmts[i] = stmt
-	}
-
-	return store, nil
-}
-
-// 获取最少使用的连接索引
-func (s *DuckStore) getLeastUsedConnIndex() int {
-	return rand.Intn(len(s.conns))
+	return &DuckStore{
+		db:         db,
+		insertStmt: stmt,
+		dbPath:     cfg.DBPath,
+		batchSize:  cfg.BatchSize,
+	}, nil
 }
 
 // WriteBatch 批量写入数据（自动去重）
@@ -128,31 +87,30 @@ func (s *DuckStore) WriteBatch(values []string) error {
 		return nil
 	}
 
-	// 选择连接的操作移到锁外面
-	connIndex := s.getLeastUsedConnIndex()
-
-	// 预分配内存也移到锁外面
-	batchSize := 1000 // 使用配置的batchSize
-	placeholders := make([]string, 0, batchSize)
-	args := make([]interface{}, 0, batchSize)
-
-	// 缩小锁的范围，只在实际写入时加锁
-	s.connMu[connIndex].Lock()
-	defer s.connMu[connIndex].Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	startTime := time.Now()
-	// 为每个批次开启新事务
-	tx, err := s.conns[connIndex].Begin()
+
+	// 开启事务
+	tx, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("开启事务失败: %w", err)
 	}
 	defer tx.Rollback()
 
+	// 预分配内存
+	const batchSize = 1000
+	placeholders := make([]string, 0, batchSize)
+	args := make([]interface{}, 0, batchSize)
+
+	// 分批处理
 	for i := 0; i < len(values); i += batchSize {
 		end := i + batchSize
 		if end > len(values) {
 			end = len(values)
 		}
+
 		// 重置切片
 		placeholders = placeholders[:0]
 		args = args[:0]
@@ -170,14 +128,15 @@ func (s *DuckStore) WriteBatch(values []string) error {
         `, strings.Join(placeholders, ","))
 
 		if _, err := tx.Exec(query, args...); err != nil {
-			tx.Rollback()
 			return fmt.Errorf("批量插入数据失败: %w", err)
 		}
 	}
-	// 提交这个批次的事务
+
+	// 提交事务
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("提交事务失败: %w", err)
 	}
+
 	atomic.AddInt64(&s.stats.totalRecords, int64(len(values)))
 	atomic.AddInt64(&s.stats.writeTime, time.Since(startTime).Nanoseconds())
 	return nil
@@ -189,7 +148,7 @@ func (s *DuckStore) ExportSorted(outputFilePrefix string) error {
 
 	// 获取总记录数
 	var totalCount int64
-	if err := s.conns[0].QueryRow("SELECT COUNT(*) FROM records").Scan(&totalCount); err != nil {
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM records").Scan(&totalCount); err != nil {
 		return fmt.Errorf("获取记录数失败: %w", err)
 	}
 
@@ -209,7 +168,7 @@ func (s *DuckStore) ExportSorted(outputFilePrefix string) error {
             ) TO '%s' (FORMAT CSV)
         `, recordsPerFile, i*recordsPerFile, fileName)
 
-		if _, err := s.conns[0].Exec(query); err != nil {
+		if _, err := s.db.Exec(query); err != nil {
 			return fmt.Errorf("导出数据到文件 %s 失败: %w", fileName, err)
 		}
 
@@ -237,10 +196,11 @@ func (s *DuckStore) GetStats() (totalRecords, uniqueRecords int64, duplicateRate
 
 // Close 关闭数据库连接并清理临时文件
 func (s *DuckStore) Close() error {
-	for _, db := range s.conns {
-		if db != nil {
-			db.Close()
-		}
+	if s.insertStmt != nil {
+		s.insertStmt.Close()
+	}
+	if s.db != nil {
+		s.db.Close()
 	}
 	return os.Remove(s.dbPath)
 }
