@@ -35,7 +35,7 @@ func main() {
 	defer store.Close()
 
 	// 导出排序后的数据
-	if err := store.ExportSorted(outputPrefix); err != nil {
+	if err := store.Export(outputPrefix); err != nil {
 		log.Fatalf("导出数据失败: %v", err)
 	}
 

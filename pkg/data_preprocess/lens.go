@@ -176,7 +176,7 @@ func ProcessS3Files(ctx context.Context, opts *options.SyncOptions) error {
 	}
 
 	// 所有数据处理完成后，导出排序后的结果
-	if err := store.ExportSorted(opts.DataPreprocessOptions.OutputFile); err != nil {
+	if err := store.Export(opts.DataPreprocessOptions.OutputFile); err != nil {
 		return fmt.Errorf("导出排序数据失败: %w", err)
 	}
 	// 输出统计信息
