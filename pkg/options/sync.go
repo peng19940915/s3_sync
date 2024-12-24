@@ -62,7 +62,7 @@ func (o *SyncOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.DataPreprocessOptions.OutputFile, "lens-output-file", "", "Output file")
 	fs.StringVar(&o.DataPreprocessOptions.Prefix, "lens-prefix", "", "Storage Lens prefix")
 	fs.IntVar(&o.DataPreprocessOptions.BatchSize, "lens-batch-size", 50000, "Storage Lens batch size")
-	fs.StringVar(&o.DataPreprocessOptions.ManifestFile, "lens-manifest-file", "", "Storage Lens manifest file")
+	fs.StringVar(&o.DataPreprocessOptions.ManifestFile, "lens-manifest-file", "manifest.json", "Storage Lens manifest file")
 	// duckdb
 	fs.StringVar(&o.DuckDBOpts.MemLimit, "duckdb-mem-limit", "8GB", "DuckDB mem limit")
 	fs.StringVar(&o.DuckDBOpts.DBPath, "duckdb-db-path", "duckdb.db", "DuckDB db path")
