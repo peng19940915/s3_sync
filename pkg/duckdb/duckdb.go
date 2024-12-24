@@ -183,17 +183,17 @@ func (s *DuckStore) WriteBatch(values []string) error {
 
 	startTime := time.Now()
 
-	tx, err := s.conns[connIndex].Begin()
-	if err != nil {
-		return fmt.Errorf("开启事务失败: %w", err)
-	}
-	defer tx.Rollback()
-
-	// 分批处理
+	// 每个批次都使用独立的事务
 	for i := 0; i < len(values); i += batchSize {
 		end := i + batchSize
 		if end > len(values) {
 			end = len(values)
+		}
+
+		// 为每个批次开启新事务
+		tx, err := s.conns[connIndex].Begin()
+		if err != nil {
+			return fmt.Errorf("开启事务失败: %w", err)
 		}
 
 		// 重置切片
@@ -213,12 +213,14 @@ func (s *DuckStore) WriteBatch(values []string) error {
         `, strings.Join(placeholders, ","))
 
 		if _, err := tx.Exec(query, args...); err != nil {
+			tx.Rollback()
 			return fmt.Errorf("批量插入数据失败: %w", err)
 		}
-	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("提交事务失败: %w", err)
+		// 立即提交这个批次的事务
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("提交事务失败: %w", err)
+		}
 	}
 
 	atomic.AddInt64(&s.stats.totalRecords, int64(len(values)))
