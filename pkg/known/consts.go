@@ -30,12 +30,5 @@ const (
 )
 
 const (
-	DUCKDB_MEM_LIMIT = "8GB"
-	DUCKDB_PATH      = "duckdb.db"
-	DUCKDB_THREADS   = 20
-)
-
-const (
-	PreProcessMaxWorkersForS3 = 10
-	PreProcessOutputBatch     = 50000 // 输出缓冲行数
+	PreProcessMaxWorkersForS3 = 10 // 并发从S3下载数据
 )

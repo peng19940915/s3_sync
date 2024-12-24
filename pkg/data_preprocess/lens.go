@@ -35,9 +35,10 @@ import (
 
 func ProcessS3Files(ctx context.Context, opts *options.SyncOptions) error {
 	duckCfg := duckdb.Config{
-		MemLimit: opts.DuckDBOpts.MemLimit,
-		DBPath:   opts.DuckDBOpts.DBPath,
-		Threads:  opts.DuckDBOpts.Threads,
+		MemLimit:  opts.DuckDBOpts.MemLimit,
+		DBPath:    opts.DuckDBOpts.DBPath,
+		Threads:   opts.DuckDBOpts.Threads,
+		BatchSize: opts.DuckDBOpts.BatchSize,
 	}
 	store, err := duckdb.NewDuckStore(duckCfg)
 	if err != nil {
@@ -52,7 +53,6 @@ func ProcessS3Files(ctx context.Context, opts *options.SyncOptions) error {
 	}
 	client := s3.NewFromConfig(cfg)
 
-	// 简化为只使用必要的通道
 	jobs := make(chan string, known.PreProcessMaxWorkersForS3)
 	results := make(chan []string, known.PreProcessMaxWorkersForS3)
 	errChan := make(chan error, known.PreProcessMaxWorkersForS3) // 统一使用一个错误通道
@@ -86,7 +86,7 @@ func ProcessS3Files(ctx context.Context, opts *options.SyncOptions) error {
 		go func() {
 			defer wg.Done()
 			for key := range jobs {
-				if err := processFile(ctx, client, opts.DataPreprocessOptions.Bucket, key, results); err != nil {
+				if err := processFile(ctx, client, opts, key, results); err != nil {
 					errChan <- err
 					return
 				}
@@ -182,10 +182,10 @@ func ProcessS3Files(ctx context.Context, opts *options.SyncOptions) error {
 }
 
 // 新增函数，用于分批处理文件内容
-func processFile(ctx context.Context, client *s3.Client, bucket, key string, results chan<- []string) error {
+func processFile(ctx context.Context, client *s3.Client, opts *options.SyncOptions, key string, results chan<- []string) error {
 	// 下载文件
 	resp, err := client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: &bucket,
+		Bucket: &opts.DataPreprocessOptions.Bucket,
 		Key:    &key,
 	})
 	if err != nil {
@@ -204,7 +204,7 @@ func processFile(ctx context.Context, client *s3.Client, bucket, key string, res
 	csvReader := csv.NewReader(gzReader)
 
 	// 使用固定大小的批处理
-	batch := make([]string, 0, known.PreProcessOutputBatch)
+	batch := make([]string, 0, opts.DataPreprocessOptions.BatchSize)
 
 	// 逐行读取并批量发送
 	for {
@@ -220,13 +220,13 @@ func processFile(ctx context.Context, client *s3.Client, bucket, key string, res
 			batch = append(batch, record[1])
 
 			// 当批次达到指定大小时发送
-			if len(batch) >= known.PreProcessOutputBatch {
+			if len(batch) >= opts.DataPreprocessOptions.BatchSize {
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
 				case results <- batch:
 					// 创建新的批次
-					batch = make([]string, 0, known.PreProcessOutputBatch)
+					batch = make([]string, 0, opts.DataPreprocessOptions.BatchSize)
 				}
 			}
 		}

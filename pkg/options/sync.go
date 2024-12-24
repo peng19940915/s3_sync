@@ -29,14 +29,16 @@ type ServerOptions struct {
 
 type DataPreprocessOptions struct {
 	Bucket     string
+	BatchSize  int
 	OutputFile string
 	Prefix     string
 }
 
 type DuckDBOptions struct {
-	MemLimit string
-	DBPath   string
-	Threads  int
+	MemLimit  string
+	DBPath    string
+	Threads   int
+	BatchSize int
 }
 
 func NewSyncOptions() *SyncOptions {
@@ -58,10 +60,12 @@ func (o *SyncOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.DataPreprocessOptions.Bucket, "lens-bucket", "", "Input Bucket")
 	fs.StringVar(&o.DataPreprocessOptions.OutputFile, "lens-output-file", "", "Output file")
 	fs.StringVar(&o.DataPreprocessOptions.Prefix, "lens-prefix", "", "Storage Lens prefix")
+	fs.IntVar(&o.DataPreprocessOptions.BatchSize, "lens-batch-size", 50000, "Storage Lens batch size")
 	// duckdb
-	fs.StringVar(&o.DuckDBOpts.MemLimit, "duckdb-mem-limit", known.DUCKDB_MEM_LIMIT, "DuckDB mem limit")
-	fs.StringVar(&o.DuckDBOpts.DBPath, "duckdb-db-path", known.DUCKDB_PATH, "DuckDB db path")
-	fs.IntVar(&o.DuckDBOpts.Threads, "duckdb-threads", known.DUCKDB_THREADS, "DuckDB threads")
+	fs.StringVar(&o.DuckDBOpts.MemLimit, "duckdb-mem-limit", "8GB", "DuckDB mem limit")
+	fs.StringVar(&o.DuckDBOpts.DBPath, "duckdb-db-path", "duckdb.db", "DuckDB db path")
+	fs.IntVar(&o.DuckDBOpts.Threads, "duckdb-threads", 20, "DuckDB threads")
+	fs.IntVar(&o.DuckDBOpts.BatchSize, "duckdb-batch", 100000, "DuckDB batch")
 }
 
 func (o *SyncOptions) Validate() error {
