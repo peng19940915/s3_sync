@@ -1,0 +1,37 @@
+{
+  "sourceBucket" : "blazers-aigc",
+  "destinationBucket" : "arn:aws:s3:::aispace-inventory",
+  "version" : "2016-11-30",
+  "creationTimestamp" : "1735002000000",
+  "fileFormat" : "CSV",
+  "fileSchema" : "Bucket, Key, Size, LastModifiedDate",
+  "files" : [ {
+    "key" : "blazers-aigc/blazers-aigc/all-inventory/data/7dfc0bdc-f886-473e-956b-99d1ea278f89.csv.gz",
+    "size" : 21049370,
+    "MD5checksum" : "403576ada95ac133c34c810aa0a2e6ee"
+  }, {
+    "key" : "blazers-aigc/blazers-aigc/all-inventory/data/d41164fe-b35d-48ff-901d-c8f7eb45e557.csv.gz",
+    "size" : 24873101,
+    "MD5checksum" : "72ee2ee01009edf0e0c9f80f293a1668"
+  }, {
+    "key" : "blazers-aigc/blazers-aigc/all-inventory/data/6c2db527-f5e0-44fb-8091-a5c2182f5e9e.csv.gz",
+    "size" : 13886378,
+    "MD5checksum" : "d0de50e559e385f80db114052b58cc2b"
+  }, {
+    "key" : "blazers-aigc/blazers-aigc/all-inventory/data/26ff987f-34ab-48b2-bb11-57029de7aba8.csv.gz",
+    "size" : 87052214,
+    "MD5checksum" : "cd2cd2805cc3e39a358c069072fcbd4f"
+  }, {
+    "key" : "blazers-aigc/blazers-aigc/all-inventory/data/75fa8d5c-9754-43af-a72b-c80eeb7fe7de.csv.gz",
+    "size" : 23459238,
+    "MD5checksum" : "3da3a98997d544527113d43ae465cc8b"
+  }, {
+    "key" : "blazers-aigc/blazers-aigc/all-inventory/data/45fe4309-5415-428b-a013-e27c979fe7d2.csv.gz",
+    "size" : 48975803,
+    "MD5checksum" : "8bc63a77bb9b94eeb0bec2b5a17e1ad0"
+  }, {
+    "key" : "blazers-aigc/blazers-aigc/all-inventory/data/bdd11f16-6516-4522-aeaa-3b4e7af0d97b.csv.gz",
+    "size" : 25898943,
+    "MD5checksum" : "109b4fe59c1dc3c54f794b0cea5f5192"
+  } ]
+}

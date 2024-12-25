@@ -1,5 +1,6 @@
 package duckdb
 
+/*
 import (
 	"database/sql"
 	"fmt"
@@ -162,8 +163,8 @@ func (s *DuckStore) Export(outputFilePrefix string) error {
 
 		exportQuery := fmt.Sprintf(`
             COPY (
-                SELECT value 
-                FROM records 
+                SELECT value
+                FROM records
                 LIMIT %d OFFSET %d
             ) TO '%s' (FORMAT CSV);
         `, recordsPerFile, offset, fileName)
@@ -204,3 +205,4 @@ func (s *DuckStore) Close() error {
 	}
 	return os.Remove(s.dbPath)
 }
+*/

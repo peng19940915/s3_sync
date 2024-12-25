@@ -19,7 +19,7 @@ type SyncOptions struct {
 	ServerOpts            ServerOptions
 	DataPreprocessOptions DataPreprocessOptions
 	Mode                  string
-	DuckDBOpts            DuckDBOptions
+	//DuckDBOpts            DuckDBOptions
 }
 
 type ServerOptions struct {
@@ -28,19 +28,21 @@ type ServerOptions struct {
 }
 
 type DataPreprocessOptions struct {
-	Bucket       string
-	BatchSize    int
-	OutputFile   string
-	Prefix       string
-	ManifestFile string
+	Bucket        string
+	FileBatchSize int
+	OutputFile    string
+	Prefix        string
+	ManifestFile  string
 }
 
+/*
 type DuckDBOptions struct {
 	MemLimit  string
 	DBPath    string
 	Threads   int
 	BatchSize int
 }
+*/
 
 func NewSyncOptions() *SyncOptions {
 	return &SyncOptions{}
@@ -57,17 +59,17 @@ func (o *SyncOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVarP(&o.RecordFile, "record-file", "f", "", "Record file")
 	fs.IntVarP(&o.ServerOpts.BindPort, "bind-port", "b", 8080, "server port")
 	fs.BoolVar(&o.ServerOpts.PprofEnable, "pprof", false, "pprof")
-	// data preprocess for storage lens
-	fs.StringVar(&o.DataPreprocessOptions.Bucket, "lens-bucket", "", "Input Bucket")
-	fs.StringVar(&o.DataPreprocessOptions.OutputFile, "lens-output-file", "", "Output file")
-	fs.StringVar(&o.DataPreprocessOptions.Prefix, "lens-prefix", "", "Storage Lens prefix")
-	fs.IntVar(&o.DataPreprocessOptions.BatchSize, "lens-batch-size", 50000, "Storage Lens batch size")
-	fs.StringVar(&o.DataPreprocessOptions.ManifestFile, "lens-manifest-file", "manifest.json", "Storage Lens manifest file")
+	// data preprocess for storage inventroy configuration
+	fs.StringVar(&o.DataPreprocessOptions.Bucket, "inventory-bucket", "", "Input Bucket")
+	fs.StringVar(&o.DataPreprocessOptions.OutputFile, "inventory-output-file", "", "Output file")
+	fs.StringVar(&o.DataPreprocessOptions.Prefix, "inventory-prefix", "", "Storage inventory configuration prefix")
+	fs.IntVar(&o.DataPreprocessOptions.FileBatchSize, "inventory-file-batch-size", 5000000, "Storage inventory file batch size")
+	fs.StringVar(&o.DataPreprocessOptions.ManifestFile, "inventory-manifest-file", "manifest.json", "Storage inventory manifest file")
 	// duckdb
-	fs.StringVar(&o.DuckDBOpts.MemLimit, "duckdb-mem-limit", "8GB", "DuckDB mem limit")
-	fs.StringVar(&o.DuckDBOpts.DBPath, "duckdb-db-path", "duckdb.db", "DuckDB db path")
-	fs.IntVar(&o.DuckDBOpts.Threads, "duckdb-threads", 20, "DuckDB threads")
-	fs.IntVar(&o.DuckDBOpts.BatchSize, "duckdb-batch", 100000, "DuckDB batch")
+	//fs.StringVar(&o.DuckDBOpts.MemLimit, "duckdb-mem-limit", "8GB", "DuckDB mem limit")
+	//fs.StringVar(&o.DuckDBOpts.DBPath, "duckdb-db-path", "duckdb.db", "DuckDB db path")
+	//fs.IntVar(&o.DuckDBOpts.Threads, "duckdb-threads", 20, "DuckDB threads")
+	//fs.IntVar(&o.DuckDBOpts.BatchSize, "duckdb-batch", 100000, "DuckDB batch")
 }
 
 func (o *SyncOptions) Validate() error {

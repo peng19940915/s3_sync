@@ -31,4 +31,5 @@ const (
 
 const (
 	PreProcessMaxWorkersForS3 = 50 // 并发从S3下载数据
+	PreProcessBatchSize       = 500000
 )
