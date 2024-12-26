@@ -1,0 +1,1 @@
+data/image_swap_log/env%3Dmodel-app-gen-v2-staging/task_type%data/backup/restored-face/50928536/restored_00024_0.png

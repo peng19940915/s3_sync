@@ -1,1 +1,2 @@
-video/templates/50/视频素材-无版权-50-多人-四姐妹-角色01.png
+aigc/agent/bin/tmp_image/%E4%B8%B4%E6%97%B6%E5%AD%98%E5%82%A8%E5%9B%BE%E7%89%87%E6%96%87%E4%BB%B6%EF%BC%8C%E5%88%AB%E5%88%A0%E9%99%A4
+data/image_swap_log/env%3Dmodel-app-gen-v2-staging/task_type%data/backup/restored-face/50928536/restored_00024_0.png

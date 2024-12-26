@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -40,6 +41,7 @@ type Syncer struct {
 	limiter      *rate.Limiter
 }
 
+var noSuchKeyCount int64
 var PathLimiter *PathLimiters
 
 // 任务对象池
@@ -187,6 +189,7 @@ func (s *Syncer) listObjectsFromFile(ctx context.Context, tasks chan<- string) e
 			}
 			line = fullLine
 		}
+		bar.Add(1)
 		key := strings.TrimSpace(string(line))
 		if key == "" {
 			continue
@@ -199,7 +202,7 @@ func (s *Syncer) listObjectsFromFile(ctx context.Context, tasks chan<- string) e
 		case <-ctx.Done():
 			return nil
 		}
-		bar.Add(1)
+		
 	}
 	hlog.Infof("Finished load all key from file:%s", s.recordFile)
 	return nil
@@ -231,20 +234,29 @@ func (s *Syncer) copyObject(ctx context.Context, key string) error {
 	}
 
 	encodedKey := utils.EncodeNonASCII(key)
+
+	decodedKey, _ := url.PathUnescape(encodedKey)
+	//fmt.Println(decodedKey,encodedKey)
 	encodedSource := fmt.Sprintf("%s/%s", s.sourceBucket, encodedKey)
 	_, err := s.client.CopyObject(ctx, &s3.CopyObjectInput{
 		Bucket:            &s.targetBucket,
 		CopySource:        &encodedSource,
-		Key:               &key,
+		Key:               &decodedKey,
 		MetadataDirective: types.MetadataDirectiveCopy,
 	})
 
 	if err != nil {
 		var apiErr smithy.APIError
-		if errors.As(err, &apiErr) &&
-			(apiErr.ErrorCode() == "InvalidRequest" && strings.Contains(apiErr.Error(), "copy source is larger than the maximum allowable size")) {
-			return s.copyLargeObjectWithSize(ctx, key)
+		if errors.As(err, &apiErr) {
+			if apiErr.ErrorCode() == "NoSuchKey" {
+				atomic.AddInt64(&noSuchKeyCount, 1)
+				return nil
+			}
+			if apiErr.ErrorCode() == "InvalidRequest" && strings.Contains(apiErr.Error(), "copy source is larger than the maximum allowable size") {
+				return s.copyLargeObjectWithSize(ctx, key)
+			}
 		}
+
 		return fmt.Errorf("failed to copy object %s: %w", key, err)
 	}
 
@@ -384,7 +396,7 @@ func (s *Syncer) Run(ctx context.Context, opts *options.SyncOptions) error {
 			select {
 			case <-ticker.C:
 				if s.recordFile == "" {
-					hlog.Infof("Cumulative Success: %d, Cumulative Failures: %d", successCount, failureCount)
+					hlog.Infof("Cumulative Success: %d, Cumulative Failures: %d, NoSuchKey: %d", successCount, failureCount, noSuchKeyCount)
 				}
 			case <-ctx.Done():
 				return nil
@@ -425,7 +437,7 @@ func (s *Syncer) Run(ctx context.Context, opts *options.SyncOptions) error {
 	// Wait for all workers to finish, then close result channels
 	defer func() {
 		ticker.Stop()
-		hlog.Infof("Cumulative Success: %d, Cumulative Failures: %d", successCount, failureCount)
+		hlog.Infof("Cumulative Success: %d, Cumulative Failures: %d, NoSuchKey: %d", successCount, failureCount, noSuchKeyCount)
 	}()
 
 	saveWaitGroup := sync.WaitGroup{}
