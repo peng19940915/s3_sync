@@ -3,18 +3,20 @@ package syncer
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/cespare/xxhash"
 	"github.com/peng19940915/s3_sync/pkg/known"
 	"golang.org/x/time/rate"
 )
 
 type PathLimiters struct {
-	shards [known.S3PathShardCount]limiterShard
+	sync.RWMutex
+	limiters map[string]*rateLimiterEntry
+	count    int32
 }
 
 type limiterShard struct {
@@ -24,59 +26,60 @@ type limiterShard struct {
 }
 
 type rateLimiterEntry struct {
-	limiter  *rate.Limiter
-	lastUsed int64
+	limiter    *rate.Limiter
+	lastUsed   int64
+	createTime int64
+	qpsLimit   float64
 }
 
 func NewPathLimiters(ctx context.Context) *PathLimiters {
-	pl := &PathLimiters{}
-	for i := 0; i < known.S3PathShardCount; i++ {
-		pl.shards[i].limiters = make(map[string]*rateLimiterEntry, 1024) // 预分配一定容量
+	pl := &PathLimiters{
+		limiters: make(map[string]*rateLimiterEntry, 1024),
 	}
 	go pl.cleanupLoop(ctx)
 	return pl
 }
 
-// 使用 xxHash 进行更快的哈希计算
-func (pl *PathLimiters) getShard(path string) *limiterShard {
-	h := xxhash.Sum64String(path)
-	return &pl.shards[h&known.S3PathShardMask]
-}
-
 func (pl *PathLimiters) GetLimiter(path string) *rate.Limiter {
-	shard := pl.getShard(path)
+	now := time.Now().Unix()
 
-	shard.RLock()
-	if entry, ok := shard.limiters[path]; ok {
-		entry.lastUsed = time.Now().Unix()
-		shard.RUnlock()
+	pl.RLock()
+	if entry, ok := pl.limiters[path]; ok {
+		entry.lastUsed = now
+		// 检查是否需要扩容
+		if now-entry.createTime >= 30 && entry.qpsLimit < 2000 {
+			entry.qpsLimit = math.Min(entry.qpsLimit*2, 2000)
+			entry.limiter.SetLimit(rate.Limit(entry.qpsLimit))
+			entry.limiter.SetBurst(int(entry.qpsLimit))
+			entry.createTime = now
+		}
+		pl.RUnlock()
 		return entry.limiter
 	}
-	shard.RUnlock()
-	shard.Lock()
-	defer shard.Unlock()
+	pl.RUnlock()
+
+	pl.Lock()
+	defer pl.Unlock()
+
 	entry := &rateLimiterEntry{
-		limiter:  rate.NewLimiter(rate.Limit(known.S3MaxCopyLimit), known.S3MaxCopyLimit),
-		lastUsed: time.Now().Unix(),
+		limiter:    rate.NewLimiter(rate.Limit(100), 100),
+		lastUsed:   now,
+		createTime: now,
+		qpsLimit:   100,
 	}
-	shard.limiters[path] = entry
-	atomic.AddInt32(&shard.count, 1)
+	pl.limiters[path] = entry
+	atomic.AddInt32(&pl.count, 1)
 	return entry.limiter
 }
 
-// cleanupLoop 定期清理过期Limiter
 func (pl *PathLimiters) cleanupLoop(ctx context.Context) {
 	ticker := time.NewTicker(known.S3PathShardCleanUpInterval * time.Second)
 	defer ticker.Stop()
-	// 分批清理，避免一次清理太多造成卡顿
-	currentShard := 0
+
 	for {
 		select {
 		case <-ticker.C:
-			for i := 0; i < 16; i++ {
-				pl.cleanupShard(&pl.shards[currentShard])
-				currentShard = (currentShard + 1) % known.S3PathShardCount
-			}
+			pl.cleanup()
 			fmt.Println(pl.GetTotalLimiters())
 		case <-ctx.Done():
 			return
@@ -84,44 +87,32 @@ func (pl *PathLimiters) cleanupLoop(ctx context.Context) {
 	}
 }
 
-// cleanupShard清理分片
-func (pl *PathLimiters) cleanupShard(shard *limiterShard) {
-	if atomic.LoadInt32(&shard.count) == 0 {
+func (pl *PathLimiters) cleanup() {
+	if atomic.LoadInt32(&pl.count) == 0 {
 		return
 	}
 	now := time.Now().Unix()
-	shard.Lock()
-	for path, entry := range shard.limiters {
+	pl.Lock()
+	for path, entry := range pl.limiters {
 		if now-entry.lastUsed > known.S3PathShardExipireTime {
-			delete(shard.limiters, path)
-			atomic.AddInt32(&shard.count, -1)
+			delete(pl.limiters, path)
+			atomic.AddInt32(&pl.count, -1)
 		}
 	}
-	shard.Unlock()
+	pl.Unlock()
 }
 
-// 获取当前限速器总数
 func (pl *PathLimiters) GetTotalLimiters() int32 {
-	var total int32
-	for i := 0; i < known.S3PathShardCount; i++ {
-		total += atomic.LoadInt32(&pl.shards[i].count)
-	}
-	return total
+	return atomic.LoadInt32(&pl.count)
 }
 
-func (pl *PathLimiters) GetShardDetail() string {
+func (pl *PathLimiters) GetDetail() string {
 	var details []string
-	for i := 0; i < known.S3PathShardCount; i++ {
-		shard := &pl.shards[i]
-		shard.RLock()
-		for path := range shard.limiters {
-			detail := fmt.Sprintf("%d,%s,%d",
-				i,
-				path,
-				atomic.LoadInt32(&shard.count))
-			details = append(details, detail)
-		}
-		shard.RUnlock()
+	pl.RLock()
+	for path := range pl.limiters {
+		detail := fmt.Sprintf("%s,%d", path, atomic.LoadInt32(&pl.count))
+		details = append(details, detail)
 	}
+	pl.RUnlock()
 	return strings.Join(details, "\n")
 }

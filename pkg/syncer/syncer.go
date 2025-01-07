@@ -202,7 +202,7 @@ func (s *Syncer) listObjectsFromFile(ctx context.Context, tasks chan<- string) e
 		case <-ctx.Done():
 			return nil
 		}
-		
+
 	}
 	hlog.Infof("Finished load all key from file:%s", s.recordFile)
 	return nil
@@ -232,7 +232,10 @@ func (s *Syncer) copyObject(ctx context.Context, key string) error {
 	if err := limiter.Wait(ctx); err != nil {
 		return fmt.Errorf("failed to wait for limiter: %w", err)
 	}
-
+	// limiter := PathLimiter.GetLimiter(key)
+	// if err := limiter.Wait(ctx); err != nil {
+	// 	return fmt.Errorf("failed to wait for limiter: %w", err)
+	// }
 	encodedKey := utils.EncodeNonASCII(key)
 
 	decodedKey, _ := url.PathUnescape(encodedKey)

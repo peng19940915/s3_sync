@@ -139,7 +139,7 @@ func ProcessS3Files(ctx context.Context, opts *options.SyncOptions) error {
 		defer writeWg.Done()
 		fileNum := 0
 		totalLineCount := 0 // 跟踪总行数，用于文件切分
-		currentBatch := make([]string, 0, known.PreProcessBatchSize)
+		//currentBatch := make([]string, 0, known.PreProcessBatchSize)
 
 		// 创建新文件并获取writer
 		createNewFile := func() (*bufio.Writer, *os.File, error) {
@@ -166,9 +166,11 @@ func ProcessS3Files(ctx context.Context, opts *options.SyncOptions) error {
 				return
 			default:
 				for _, line := range paths {
-					// 检查是否需要创建新文件（
 					if totalLineCount >= opts.DataPreprocessOptions.FileBatchSize {
-						writer.Flush()
+						if err := writer.Flush(); err != nil {
+							errChan <- fmt.Errorf("flush error: %w", err)
+							return
+						}
 						file.Close()
 
 						writer, file, err = createNewFile()
@@ -179,33 +181,18 @@ func ProcessS3Files(ctx context.Context, opts *options.SyncOptions) error {
 						totalLineCount = 0
 					}
 
-					currentBatch = append(currentBatch, line)
-
-					if len(currentBatch) >= known.PreProcessBatchSize {
-						for _, batchLine := range currentBatch {
-							if _, err := writer.WriteString(batchLine + "\n"); err != nil {
-								errChan <- err
-								return
-							}
-						}
-						writer.Flush()                  // 确保数据写入磁盘
-						currentBatch = currentBatch[:0] // 重用切片
+					if _, err := writer.WriteString(line + "\n"); err != nil {
+						errChan <- err
+						return
 					}
-
 					totalLineCount++
 				}
-			}
-		}
 
-		// 处理最后的批次
-		if len(currentBatch) > 0 {
-			for _, line := range currentBatch {
-				if _, err := writer.WriteString(line + "\n"); err != nil {
-					errChan <- err
+				if err := writer.Flush(); err != nil {
+					errChan <- fmt.Errorf("flush error: %w", err)
 					return
 				}
 			}
-			writer.Flush()
 		}
 	}()
 
@@ -263,7 +250,7 @@ func writeToFile(filepath string, lines []string) error {
 	return nil
 }
 
-// 新增函数，用��分批处理文件内容
+// 新增函数，用分批处理文件内容
 func processFile(ctx context.Context, client *s3.Client, opts *options.SyncOptions, file ManifestFile, results chan<- []string) error {
 	// Get buffer from pool
 	buffer := bufferPool.Get().([]byte)
@@ -304,27 +291,32 @@ func processFile(ctx context.Context, client *s3.Client, opts *options.SyncOptio
 		if len(record) >= 2 {
 			batch = append(batch, record[1])
 
-			// 当批次达到指定大小时发送
 			if len(batch) >= known.PreProcessBatchSize {
+				// 创建批次的副本
+				batchCopy := make([]string, len(batch))
+				copy(batchCopy, batch)
+
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
-				case results <- batch:
-					// 创建新的批次
-					batch = make([]string, 0, known.PreProcessBatchSize)
+				case results <- batchCopy:
+					batch = batch[:0] // 重置批次，而不是创建新的
 				}
 			}
 		}
 	}
 
-	// 发送最后的批次
+	// 处理最后的批次
 	if len(batch) > 0 {
+		batchCopy := make([]string, len(batch))
+		copy(batchCopy, batch)
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case results <- batch:
+		case results <- batchCopy:
 		}
 	}
-	fmt.Println(fmt.Sprintf("处理完成 %s", file.Key))
+
 	return nil
 }

@@ -35,6 +35,20 @@ will record the file copy status, if the file is successfully copied, it will no
 
 ## Inventory Configuration file list split
 if the file list is large, such as 100 million files, we need to split the file list into multiple files, 5000000 files per file.
+## Compare with other solutions
+### AWS Data Sync
+
+### AWS S3 Replication Copy（US-East-1）
+- SRR
+API Request Costs
+   - Source Bucket GET: 1000 × ($0.0004/1000) = $0.0004
+   - Source Bucket HEAD: 1000 × ($0.0004/1000) = $0.0004
+   - LIST Requests: ~10 × ($0.0005/1000) = $0.000005
+   
+   - Destination Bucket PUT: 1000 × ($0.005/1000) = $0.005
+   - Destination Bucket HEAD: 1000 × ($0.0004/1000) = $0.0004
+Total: $0.005805
+- CRR
 
 ### How to use?
 In S3 Path: s3://aispace-inventory/you-bucket-name/you-bucket-name/all-inventory/ you will find the following structure:
