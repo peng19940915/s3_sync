@@ -15,7 +15,9 @@ import (
 	"github.com/schollz/progressbar/v3"
 	"golang.org/x/time/rate"
 )
-
+/*
+根据清单，删除文件
+*/
 var (
 	bucket      string
 	keysFile    string

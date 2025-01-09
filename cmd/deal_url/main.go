@@ -1,5 +1,10 @@
 package main
 
+/*
+	故障处理：
+	处理url编码的文件
+	将url编码的文件转换为普通文件
+*/
 import (
 	"bufio"
 	"flag"

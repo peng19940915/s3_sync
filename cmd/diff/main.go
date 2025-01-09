@@ -7,6 +7,20 @@ import (
 	"sync"
 )
 
+/*
+比较两个文件，输出两个文件的差异
+用法：
+
+	diff -f file1 file2 output
+	file1: 原始文件
+	file2: 需要被比对的文件
+
+比如想找出file2 在 file1 中不存在的行，可以执行：
+
+	diff -f oldfile newfile output
+
+然后查看output文件，里面就是file2在file1中不存在的行,常用于对比文件，比如下载了一个新的文件清单，想和前一天的做对比，找出需要同步的，或者反过来，找出需要删除的
+*/
 func main() {
 	if len(os.Args) != 4 {
 		fmt.Println("Usage: program file1 file2 output")
