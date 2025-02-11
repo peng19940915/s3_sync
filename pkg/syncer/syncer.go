@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -39,6 +40,9 @@ type Syncer struct {
 	copiedKeys   sync.Map
 	recordFile   string
 	limiter      *rate.Limiter
+	startDt      time.Time
+	endDt        time.Time
+	dtRegex      *regexp.Regexp
 }
 
 var noSuchKeyCount int64
@@ -61,7 +65,12 @@ func NewSyncer(ctx context.Context, opts *options.SyncOptions) *Syncer {
 		workers:      opts.Workers,
 		prefix:       opts.Prefix,
 		recordFile:   opts.RecordFile,
+		dtRegex:      regexp.MustCompile(`dt%3D(\d{4}-\d{2}-\d{2})`),
 		limiter:      rate.NewLimiter(rate.Limit(known.S3MaxCopyLimit), known.S3MaxCopyLimit), // 每秒2000个请求
+	}
+	if opts.StartDt != "" && opts.EndDt != "" {
+		s.startDt, _ = time.Parse("2006-01-02", opts.StartDt)
+		s.endDt, _ = time.Parse("2006-01-02", opts.EndDt)
 	}
 	s.loadCopiedKeys(fmt.Sprintf("%s_%s.txt", known.SuccessRecordPath, s.sourceBucket))
 	return s
@@ -131,6 +140,9 @@ func (s *Syncer) listObjects(ctx context.Context, tasks chan<- string) error {
 			if _, ok := s.copiedKeys.Load(*obj.Key); ok {
 				continue
 			}
+			if !utils.CheckDt(*obj.Key, s.startDt, s.endDt) {
+				continue
+			}
 			select {
 			case tasks <- *obj.Key:
 			case <-ctx.Done():
@@ -194,7 +206,15 @@ func (s *Syncer) listObjectsFromFile(ctx context.Context, tasks chan<- string) e
 		if key == "" {
 			continue
 		}
+		// 过滤掉prefix
+		if !strings.HasPrefix(key, s.prefix) {
+			continue
+		}
 		if _, ok := s.copiedKeys.Load(key); ok {
+			continue
+		}
+		// TODO：增加dt限制
+		if !utils.CheckDt(key, s.startDt, s.endDt) {
 			continue
 		}
 		select {

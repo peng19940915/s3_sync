@@ -3,6 +3,7 @@ package options
 import (
 	"errors"
 	"os"
+	"time"
 
 	"github.com/peng19940915/s3_sync/pkg/known"
 	"github.com/spf13/pflag"
@@ -20,6 +21,8 @@ type SyncOptions struct {
 	DataPreprocessOptions DataPreprocessOptions
 	Mode                  string
 	//DuckDBOpts            DuckDBOptions
+	StartDt string
+	EndDt   string
 }
 
 type ServerOptions struct {
@@ -59,6 +62,8 @@ func (o *SyncOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVarP(&o.RecordFile, "record-file", "f", "", "Record file")
 	fs.IntVarP(&o.ServerOpts.BindPort, "bind-port", "b", 8080, "server port")
 	fs.BoolVar(&o.ServerOpts.PprofEnable, "pprof", false, "pprof")
+	fs.StringVar(&o.StartDt, "start-dt", "", "Start dt")
+	fs.StringVar(&o.EndDt, "end-dt", "", "End dt")
 	// data preprocess for storage inventroy configuration
 	fs.StringVar(&o.DataPreprocessOptions.Bucket, "inventory-bucket", "", "Input Bucket")
 	fs.StringVar(&o.DataPreprocessOptions.OutputFile, "inventory-output-file", "", "Output file")
@@ -88,6 +93,22 @@ func (o *SyncOptions) Validate() error {
 		}
 		if o.TargetBucket == "" || o.SourceBucket == "" {
 			return errors.New("target-bucket and source-bucket are required when record-file is set")
+		}
+	}
+	if o.StartDt != "" || o.EndDt != "" {
+		if o.StartDt == "" || o.EndDt == "" {
+			return errors.New("start-dt and end-dt are required when start-dt or end-dt is set")
+		}
+		start, err := time.Parse("2006-01-02", o.StartDt)
+		if err != nil {
+			return errors.New("failed to parse start-dt: " + err.Error())
+		}
+		end, err := time.Parse("2006-01-02", o.EndDt)
+		if err != nil {
+			return errors.New("failed to parse end-dt: " + err.Error())
+		}
+		if start.After(end) {
+			return errors.New("start-dt is after end-dt: " + o.StartDt + ", " + o.EndDt)
 		}
 	}
 	return nil

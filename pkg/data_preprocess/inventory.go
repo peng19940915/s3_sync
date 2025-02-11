@@ -9,8 +9,10 @@ croc --relay "172.29.0.147:1111" send sync
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build .
 
 ./sync -f keys.txt -s blazers-aigc -t mobiu-blazers-aigc -w 10
-
+./sync -s dywx-data-ad -t mega-mo-dywx-data-ad --prefix='prod/ods/ods_ad_mixed_adx_click_inc_realtime/dt=2025-02-10'
 ./sync -f test.txt -s dywx-aigc-temp -t mobiu-dywx-aigc-temp -w 10
+./sync -f keys.txt -s dywx-data-ad -t mega-mo-dywx-data-ad --prefix='prod/ods/ods_ad_mixed_adx_click_inc_realtime' -w 10
+./sync -m preprocess --inventory-bucket ltp-dywx-migrate --inventory-output-file keys.txt --inventory-prefix mo//dywx-data-ad/mo-migrate_dywx-data-ad/data/ --inventory-file-batch-size 50000000 --end-dt='2025-02-09' --start-dt='2024-11-11'
 
 CGO_ENABLED=1 CGO_LDFLAGS="-L/home/ec2-user/leiyupeng/duckdb/libs/" go build -tags=duckdb_use_lib .
 ./sync -m preprocess --lens-bucket aispace-inventory --lens-output-file keys.txt --lens-prefix dywx-aigc/dywx-aigc/all-inventory/data/ --duckdb-mem-limit=16GB --duckdb-threads=1000 --lens-batch-size=200000
@@ -29,6 +31,7 @@ import (
 	"time"
 
 	"github.com/peng19940915/s3_sync/pkg/options"
+	"github.com/peng19940915/s3_sync/pkg/utils"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -277,7 +280,8 @@ func processFile(ctx context.Context, client *s3.Client, opts *options.SyncOptio
 	batch := *batchPool.Get().(*[]string)
 	defer batchPool.Put(&batch)
 	batch = batch[:0] // Reset batch
-
+	startDt, _ := time.Parse("2006-01-02", opts.StartDt)
+	endDt, _ := time.Parse("2006-01-02", opts.EndDt)
 	// 逐行读取并批量发送
 	for {
 		record, err := csvReader.Read()
@@ -289,6 +293,17 @@ func processFile(ctx context.Context, client *s3.Client, opts *options.SyncOptio
 		}
 
 		if len(record) >= 2 {
+			// TODO 忽略深度存储
+			if len(record) == 3 {
+				if record[2] != "STANDARD" {
+					continue
+				}
+			}
+			// 根据时间筛选
+			if !utils.CheckDt(record[1], startDt, endDt) {
+				continue
+			}
+
 			batch = append(batch, record[1])
 
 			if len(batch) >= known.PreProcessBatchSize {

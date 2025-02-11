@@ -1,6 +1,7 @@
 package known
 
 import (
+	"regexp"
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -13,3 +14,5 @@ var DefaultBackoff = wait.Backoff{
 	Steps:    S3CopyMaxRetries,            // 最多重试 5 次
 	Cap:      S3CopyMaxWait * time.Second, // 最大等待时间不超过 30 秒
 }
+
+var DtRegex = regexp.MustCompile(`dt=(\d{4}-\d{2}-\d{2})`)
